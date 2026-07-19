@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/tunnel_widget_background"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="14dp">
+
+    <!-- Glowing Status Indicator Dot -->
+    <ImageView
+        android:id="@+id/widget_status_dot"
+        android:layout_width="10dp"
+        android:layout_height="10dp"
+        android:layout_marginEnd="10dp"
+        android:src="@drawable/widget_dot_gray"
+        android:contentDescription="Status Dot" />
+
+    <!-- Connection Info (Status & Speed) -->
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/widget_status_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="qWDTT: Отключен"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_stats_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:text="Нажмите для подключения"
+            android:textColor="#B3FFFFFF"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <!-- Connect/Disconnect Action Button -->
+    <ImageView
+        android:id="@+id/widget_toggle_button"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:padding="10dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:src="@android:drawable/ic_media_play"
+        android:tint="#3DDC84"
+        android:contentDescription="Connect Button" />
+
+</LinearLayout>
