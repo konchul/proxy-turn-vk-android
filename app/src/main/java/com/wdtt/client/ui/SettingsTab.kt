@@ -28,7 +28,9 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -93,7 +95,8 @@ fun SettingsTab(
     onDynamicColorChange: (Boolean) -> Unit,
     currentPalette: String,
     onPaletteChange: (String) -> Unit,
-    onConnectRequested: () -> Unit = {}
+    onConnectRequested: () -> Unit = {},
+    onOpenProfiles: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -113,7 +116,8 @@ fun SettingsTab(
             onDynamicColorChange = onDynamicColorChange,
             currentPalette = currentPalette,
             onPaletteChange = onPaletteChange,
-            onConnectRequested = onConnectRequested
+            onConnectRequested = onConnectRequested,
+            onOpenProfiles = onOpenProfiles,
         )
     }
 }
@@ -130,7 +134,8 @@ fun SettingsTabContent(
     onDynamicColorChange: (Boolean) -> Unit,
     currentPalette: String,
     onPaletteChange: (String) -> Unit,
-    onConnectRequested: () -> Unit = {}
+    onConnectRequested: () -> Unit = {},
+    onOpenProfiles: () -> Unit = {},
 ) {
     val savedConnectionPassword by settingsStore.connectionPassword.collectAsStateWithLifecycle(initialValue = "")
     val savedManualPortsEnabled by settingsStore.manualPortsEnabled.collectAsStateWithLifecycle(initialValue = false)
@@ -140,6 +145,7 @@ fun SettingsTabContent(
 
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val tunnelConnecting by TunnelManager.isConnecting.collectAsStateWithLifecycle()
+    val tunnelReconnecting by TunnelManager.isReconnecting.collectAsStateWithLifecycle()
     tunnelRunning || tunnelConnecting
     var connectCancelArmed by remember { mutableStateOf(false) }
     LaunchedEffect(tunnelConnecting, tunnelRunning) {
@@ -153,6 +159,7 @@ fun SettingsTabContent(
     }
     val autoSwitchToLogs by settingsStore.autoSwitchToLogs.collectAsStateWithLifecycle(initialValue = true)
     val stopOnWifi by settingsStore.stopOnWifi.collectAsStateWithLifecycle(initialValue = false)
+    val connectionPipelineEnabled by settingsStore.connectionPipelineEnabled.collectAsStateWithLifecycle(initialValue = true)
     val detailedLogs by settingsStore.detailedLogs.collectAsStateWithLifecycle(initialValue = false)
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = com.wdtt.client.DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
@@ -739,6 +746,38 @@ fun SettingsTabContent(
                             checked = autoSwitchToLogs,
                             onCheckedChange = { enabled ->
                                 scope.launch { settingsStore.saveAutoSwitchToLogs(enabled) }
+                            }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+                            Text(
+                                "Схема подключения",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                "Показывать этапы DNS → VK → DTLS → VPN на вкладке «Логи»",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = connectionPipelineEnabled,
+                            onCheckedChange = { enabled ->
+                                scope.launch {
+                                    settingsStore.saveConnectionPipelineEnabled(enabled)
+                                    if (!enabled) {
+                                        TunnelManager.hideConnectionPipelineForSettings()
+                                    }
+                                }
                             }
                         )
                     }
@@ -1535,6 +1574,51 @@ fun SettingsTabContent(
                         }
                     }
                 }
+            } else {
+                Surface(
+                    onClick = onOpenProfiles,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f),
+                    border = BorderStroke(
+                        1.dp,
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                    ),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Нет серверов",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                "Добавьте или импортируйте профиль во вкладке «Профили»",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Icon(
+                            Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
             }
 
             Row(
@@ -1564,7 +1648,7 @@ fun SettingsTabContent(
                 Button(
                     onClick = {
                         when {
-                            tunnelRunning || (tunnelConnecting && connectCancelArmed) -> {
+                            tunnelRunning || tunnelReconnecting || (tunnelConnecting && connectCancelArmed) -> {
                                 context.startService(
                                     Intent(context, TunnelService::class.java).apply { action = "STOP" }
                                 )
@@ -1577,8 +1661,9 @@ fun SettingsTabContent(
                             }
                         }
                     },
-                    enabled = (isValid && cooldownSeconds == 0 && !tunnelConnecting) ||
+                    enabled = (isValid && cooldownSeconds == 0 && !tunnelConnecting && !tunnelReconnecting) ||
                         tunnelRunning ||
+                        tunnelReconnecting ||
                         (tunnelConnecting && connectCancelArmed),
                     modifier = Modifier
                         .weight(1f)
@@ -1591,7 +1676,7 @@ fun SettingsTabContent(
                 ) {
                     Icon(
                         imageVector = when {
-                            tunnelRunning || (tunnelConnecting && connectCancelArmed) -> Icons.Default.Stop
+                            tunnelRunning || tunnelReconnecting || (tunnelConnecting && connectCancelArmed) -> Icons.Default.Stop
                             else -> Icons.Default.PowerSettingsNew
                         },
                         contentDescription = null,
@@ -1600,6 +1685,7 @@ fun SettingsTabContent(
                     Spacer(Modifier.width(8.dp))
                     Text(
                         text = when {
+                            tunnelReconnecting -> "Переподключение…"
                             tunnelConnecting && !tunnelRunning && !connectCancelArmed -> "Подключение…"
                             tunnelConnecting && !tunnelRunning -> "Отмена"
                             tunnelRunning -> "Остановить"

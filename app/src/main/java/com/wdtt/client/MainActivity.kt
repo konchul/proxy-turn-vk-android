@@ -527,7 +527,8 @@ fun MainScreen(
                             onDynamicColorChange = onDynamicColorChange,
                             currentPalette = currentPalette,
                             onPaletteChange = onPaletteChange,
-                            onConnectRequested = { pendingSwitchToLogs = true }
+                            onConnectRequested = { pendingSwitchToLogs = true },
+                            onOpenProfiles = { selectedTab = 2 },
                         )
                         1 -> DeployTab()
                         2 -> ProfilesTab(

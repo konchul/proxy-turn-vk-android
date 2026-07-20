@@ -4,6 +4,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
@@ -28,6 +33,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.wdtt.client.ConnectionPipelineCard
 import com.wdtt.client.LogEntry
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.WDTTColors
@@ -42,6 +48,7 @@ fun LogsTab() {
     val isRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val isConnecting by TunnelManager.isConnecting.collectAsStateWithLifecycle()
     val connectedSinceMs by TunnelManager.connectedSinceMs.collectAsStateWithLifecycle()
+    val pipelineState by TunnelManager.connectionPipeline.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -173,7 +180,24 @@ fun LogsTab() {
                     )
                 }
 
-                if (scrollableLogs.isEmpty() && pinnedStatsMessage == null && uptimeText == null) {
+                AnimatedVisibility(
+                    visible = pipelineState.visible,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically(),
+                ) {
+                    Column {
+                        ConnectionPipelineCard(
+                            state = pipelineState,
+                            isDark = isDark,
+                        )
+                        HorizontalDivider(
+                            color = WDTTColors.terminalBlue.copy(alpha = 0.20f),
+                            thickness = 1.dp
+                        )
+                    }
+                }
+
+                if (scrollableLogs.isEmpty() && pinnedStatsMessage == null && uptimeText == null && !pipelineState.visible) {
                     Box(
                         modifier = Modifier.fillMaxSize().padding(32.dp),
                         contentAlignment = Alignment.Center

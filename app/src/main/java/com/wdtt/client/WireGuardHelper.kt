@@ -106,9 +106,15 @@ class WireGuardHelper(context: Context) {
                 if (peer.endpoint.isPresent) peerBuilder.parseEndpoint(peer.endpoint.get().toString())
                 if (peer.persistentKeepalive.isPresent) peerBuilder.parsePersistentKeepalive(peer.persistentKeepalive.get().toString())
             }
-            peerBuilder.parseAllowedIPs("0.0.0.0/0")
-            
-            val finalConfig = Config.Builder()
+            val runetDirect = settingsStore.runetDirect.first()
+            val allowedIps = if (runetDirect) {
+                RunetDirectHelper.allowedIpsV4(appContext)
+            } else {
+                "0.0.0.0/0"
+            }
+            peerBuilder.parseAllowedIPs(allowedIps)
+
+            var finalConfig = Config.Builder()
                 .setInterface(newInterface)
                 .addPeer(peerBuilder.build())
                 .build()
@@ -116,7 +122,31 @@ class WireGuardHelper(context: Context) {
             disabledByEmptyWhitelist = false
             stopSharedTunnel("previous tunnel before restart")
             val nextTunnel = WgTunnel()
-            setTunnelUpWithRetry(nextTunnel, finalConfig)
+            try {
+                setTunnelUpWithRetry(nextTunnel, finalConfig)
+            } catch (e: Exception) {
+                // Binder ~1MB: слишком длинный AllowedIPs → откат на полный туннель.
+                if (runetDirect && e.isTransactionTooLarge()) {
+                    Log.w("WG", "Runet direct AllowedIPs too large for Binder, falling back to 0.0.0.0/0")
+                    val fallbackPeer = Peer.Builder()
+                    firstPeer.let { peer ->
+                        fallbackPeer.parsePublicKey(peer.publicKey.toBase64())
+                        if (peer.preSharedKey.isPresent) fallbackPeer.parsePreSharedKey(peer.preSharedKey.get().toBase64())
+                        if (peer.endpoint.isPresent) fallbackPeer.parseEndpoint(peer.endpoint.get().toString())
+                        if (peer.persistentKeepalive.isPresent) {
+                            fallbackPeer.parsePersistentKeepalive(peer.persistentKeepalive.get().toString())
+                        }
+                    }
+                    fallbackPeer.parseAllowedIPs("0.0.0.0/0")
+                    finalConfig = Config.Builder()
+                        .setInterface(newInterface)
+                        .addPeer(fallbackPeer.build())
+                        .build()
+                    setTunnelUpWithRetry(nextTunnel, finalConfig)
+                } else {
+                    throw e
+                }
+            }
             sharedTunnel = nextTunnel
             Log.d("WG", "WireGuard tunnel started successfully")
         } catch (e: Exception) {
@@ -219,6 +249,16 @@ class WireGuardHelper(context: Context) {
 
     private fun Throwable.isEmptyWhitelistFailure(): Boolean {
         return message?.contains(EMPTY_WHITELIST_MESSAGE) == true
+    }
+
+    private fun Throwable.isTransactionTooLarge(): Boolean {
+        var cur: Throwable? = this
+        while (cur != null) {
+            if (cur is android.os.TransactionTooLargeException) return true
+            if (cur.message?.contains("TransactionTooLargeException", ignoreCase = true) == true) return true
+            cur = cur.cause
+        }
+        return false
     }
 
     private fun isSharedTunnelUpLocked(): Boolean {

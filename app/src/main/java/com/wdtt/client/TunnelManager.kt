@@ -2,6 +2,7 @@ package com.wdtt.client
 
 import android.annotation.SuppressLint
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,6 +46,8 @@ object TunnelManager {
     
     @Volatile
     private var isDetailedLogsEnabled = false
+    @Volatile
+    private var isConnectionPipelineEnabled = true
 
     // Error counters for circuit breaker
     private var floodCount = 0
@@ -85,6 +88,11 @@ object TunnelManager {
     val stats = MutableStateFlow("Ожидание данных...")
     val activeWorkers = MutableStateFlow(0)
     val isReconnecting = MutableStateFlow(false)
+    val connectionPipeline = MutableStateFlow(ConnectionPipelineState())
+    /** Плановый рестарт транспорта (смена сети): log reader не должен сбрасывать running. */
+    @Volatile
+    var transportRestartInProgress: Boolean = false
+        private set
 
     fun formatUptime(elapsedMs: Long): String {
         val totalSec = (elapsedMs.coerceAtLeast(0L)) / 1000L
@@ -102,10 +110,18 @@ object TunnelManager {
     val cooldownSeconds = MutableStateFlow(0)
     private var cooldownJob: Job? = null
     private var startJob: Job? = null
+    private var pipelineHideJob: Job? = null
+    private var pipelineStepTimeoutJob: Job? = null
     @Volatile
     private var connectingStartedAtMs = 0L
     private val startGate = Any()
     private const val CONNECT_STOP_GRACE_MS = 2_500L
+    /** После успешного подключения схема скрывается, чтобы не занимать логи. */
+    private const val PIPELINE_HIDE_AFTER_SUCCESS_MS = 4_000L
+    /** Лимит на один шаг схемы (кроме Потоков и Капчи). */
+    private const val PIPELINE_STEP_TIMEOUT_MS = 10_000L
+    /** Вход в несколько звонков через аккаунт VK может занять дольше. */
+    private const val PIPELINE_VK_STEP_TIMEOUT_MS = 30_000L
     /** Инкремент → MainActivity / SettingsTab открывают диалог ⚙️ настроек. */
     val openAppSettingsRequest = MutableStateFlow(0L)
 
@@ -119,6 +135,24 @@ object TunnelManager {
         connectingStartedAtMs = System.currentTimeMillis()
         isConnecting.value = true
         stats.value = hint
+        val ctx = lastContext?.get()
+        if (ctx != null) {
+            scope.launch {
+                isConnectionPipelineEnabled = SettingsStore(ctx).connectionPipelineEnabled.first()
+                if (!isConnectionPipelineEnabled) {
+                    hideConnectionPipeline()
+                } else if (isConnecting.value && !running.value) {
+                    resetConnectionPipeline()
+                }
+            }
+        }
+        resetConnectionPipeline()
+    }
+
+    /** Вызывается из настроек при выключении схемы. */
+    fun hideConnectionPipelineForSettings() {
+        isConnectionPipelineEnabled = false
+        hideConnectionPipeline()
     }
 
     fun cancelConnectingIfNeeded() {
@@ -212,16 +246,25 @@ object TunnelManager {
         
         if (!isSwitching) {
             clearLogs()
+            // Флаг обновится в startJob через first()/collect; пока — кэш.
+            resetConnectionPipeline()
             config.value = null
             connectingStartedAtMs = System.currentTimeMillis()
             isConnecting.value = true
             stats.value = "Подключение…"
-            updateLog("start_progress", "Подключение…", 0, false)
             
             detailedLogsJob?.cancel()
             detailedLogsJob = scope.launch {
-                SettingsStore(appContext).detailedLogs.collect {
-                    isDetailedLogsEnabled = it
+                launch {
+                    SettingsStore(appContext).detailedLogs.collect {
+                        isDetailedLogsEnabled = it
+                    }
+                }
+                launch {
+                    SettingsStore(appContext).connectionPipelineEnabled.collect { enabled ->
+                        isConnectionPipelineEnabled = enabled
+                        if (!enabled) hideConnectionPipeline()
+                    }
                 }
             }
             floodCount = 0
@@ -255,6 +298,16 @@ object TunnelManager {
                 isDetailedLogsEnabled = runCatching {
                     SettingsStore(appContext).detailedLogs.first()
                 }.getOrDefault(false)
+                if (!isSwitching) {
+                    isConnectionPipelineEnabled = runCatching {
+                        SettingsStore(appContext).connectionPipelineEnabled.first()
+                    }.getOrDefault(true)
+                    if (!isConnectionPipelineEnabled) {
+                        hideConnectionPipeline()
+                    } else if (!connectionPipeline.value.visible) {
+                        resetConnectionPipeline()
+                    }
+                }
 
                 if (!isSwitching) {
                     try {
@@ -274,12 +327,12 @@ object TunnelManager {
 
                 if (hashList.isEmpty()) {
                     updateLog("hash_error", "Ошибка: Хеш не указан", 99, true)
-                    finishConnectingFailed()
+                    abortStart(isSwitching, "Хеш не указан")
                     return@launch
                 }
                 if (params.connectionPassword.isBlank()) {
                     updateLog("password_error", "Ошибка: пароль подключения не указан", 99, true)
-                    finishConnectingFailed()
+                    abortStart(isSwitching, "Пароль не указан")
                     return@launch
                 }
 
@@ -302,7 +355,7 @@ object TunnelManager {
                 
                 if (!binaryFile.exists()) {
                     updateLog("binary_error", "Ошибка: Бинарный файл не найден", 99, true)
-                    finishConnectingFailed()
+                    abortStart(isSwitching, "Бинарный файл не найден")
                     return@launch
                 }
 
@@ -341,8 +394,6 @@ object TunnelManager {
 
                 cmd.add("-go-dns")
                 cmd.add(params.goDnsArg)
-                val goDnsDisplay = SettingsStore.goDnsDisplayFromArg(params.goDnsArg)
-                updateLog("go_dns", SettingsStore.formatGoDnsLogLine(goDnsDisplay), 1, false)
 
                 cmd.add("-obfs")
                 cmd.add(SettingsStore.normalizeObfsMode(params.obfsMode))
@@ -353,7 +404,7 @@ object TunnelManager {
                     false
                 )
 
-                updateLog("go_dns_precheck_start", "[СЕТЬ] Проверка DNS перед запуском…", 1, false)
+                setConnectionPipelineCurrent(ConnectionStep.DNS)
                 val dnsProbe = GoDnsProbe.check(params.goDnsArg)
                 if (!dnsProbe.reachable) {
                     updateLog(
@@ -362,40 +413,51 @@ object TunnelManager {
                         50,
                         true
                     )
+                    failConnectionPipeline(ConnectionStep.DNS)
                     updateLog(
                         "go_dns_tip",
                         "[СЕТЬ] Смените DNS в ⚙️ → Сеть (Яндекс / Cloudflare / Google / DoH / Свой)",
                         50,
                         true
                     )
+                    abortStart(isSwitching, "DNS недоступен")
+                    return@launch
                 } else {
                     updateLog("go_dns_precheck_ok", "[СЕТЬ] DNS доступен: ${dnsProbe.statusText}", 1, false)
+                    advanceConnectionPipeline(ConnectionStep.DNS, ConnectionStep.VK)
                 }
 
                 if (!params.vkAuthMode.equals("anonymous", ignoreCase = true)) {
                     try {
                         stats.value = "VK: вход в звонок…"
                         updateLog("vk_auth_start", "[VK Auth] Вход в звонок…", 5, false)
+                        setConnectionPipelineCurrent(ConnectionStep.VK)
                         val credsByHash = VkAuthWebViewManager.authenticateAll(appContext, hashList)
                         val credsFile = VkAuthWebViewManager.writeCredsFile(appContext, credsByHash)
                         cmd.add("-vk-creds-file")
                         cmd.add(credsFile.absolutePath)
                         stats.value = "Запуск туннеля…"
                         updateLog("vk_auth_ok", "[VK Auth] TURN OK (${credsByHash.size})", 5, false)
+                        advanceConnectionPipeline(ConnectionStep.VK, ConnectionStep.WRAP)
                     } catch (e: kotlinx.coroutines.CancellationException) {
-                        updateLog("start_cancelled", "Подключение отменено", 50, false)
-                        finishConnectingFailed()
+                        if (isSwitching) {
+                            handleReconnectFailed("Подключение отменено")
+                        } else {
+                            updateLog("start_cancelled", "Подключение отменено", 50, false)
+                            finishConnectingFailed()
+                        }
                         throw e
                     } catch (e: Exception) {
                         val msg = e.message ?: e::class.java.simpleName
                         updateLog("vk_auth_fail", "Ошибка авторизации VK: $msg", 99, true)
-                        finishConnectingFailed()
+                        failConnectionPipeline(ConnectionStep.VK)
+                        abortStart(isSwitching, msg)
                         return@launch
                     }
                 }
 
                 if (!isActive) {
-                    finishConnectingFailed()
+                    abortStart(isSwitching, "Подключение прервано")
                     return@launch
                 }
 
@@ -412,27 +474,44 @@ object TunnelManager {
                 wrapAuthTimeoutCount = 0
                 lastActiveAtMs = 0L
                 lastStatsReceivedAtMs = System.currentTimeMillis()
+                transportRestartInProgress = false
                 isConnecting.value = false
                 markRunning(true)
                 stats.value = "Ожидание данных..."
-                updateLog("start_progress", "Туннель запускается…", 0, false)
                 startLogReader()
                 startWatchdog(appContext, params)
 
             } catch (e: kotlinx.coroutines.CancellationException) {
-                updateLog("start_cancelled", "Подключение отменено", 50, false)
-                finishConnectingFailed()
+                if (isSwitching) {
+                    handleReconnectFailed("Подключение отменено")
+                } else {
+                    updateLog("start_cancelled", "Подключение отменено", 50, false)
+                    finishConnectingFailed()
+                }
                 throw e
             } catch (e: Exception) {
-                updateLog("critical_start_error", "Критическая ошибка запуска: ${e.message}", 99, true)
-                e.printStackTrace()
-                finishConnectingFailed()
+                if (isSwitching) {
+                    handleReconnectFailed("Критическая ошибка: ${e.message}")
+                } else {
+                    updateLog("critical_start_error", "Критическая ошибка запуска: ${e.message}", 99, true)
+                    e.printStackTrace()
+                    finishConnectingFailed()
+                }
             }
         }
         }
     }
 
+    private fun abortStart(isSwitching: Boolean, message: String) {
+        if (isSwitching) {
+            handleReconnectFailed(message)
+        } else {
+            finishConnectingFailed()
+        }
+    }
+
     private fun finishConnectingFailed() {
+        transportRestartInProgress = false
         isConnecting.value = false
         markRunning(false)
         if (stats.value == "Подключение…" ||
@@ -440,6 +519,16 @@ object TunnelManager {
             stats.value == "Запуск туннеля…"
         ) {
             stats.value = "Ожидание данных..."
+        }
+    }
+
+    private fun handleReconnectFailed(reason: String) {
+        transportRestartInProgress = false
+        isReconnecting.value = false
+        updateLog("reconnect_fail", "❌ Переподключение не удалось: $reason", 99, true)
+        scope.launch(Dispatchers.Main) {
+            wgHelper?.stopTunnel()
+            stop(force = true)
         }
     }
 
@@ -470,31 +559,8 @@ object TunnelManager {
 
                     val isError = lineTrim.contains("Ошибка", true) || lineTrim.contains("error", true) || lineTrim.contains("FAIL", true) || lineTrim.contains("timeout", true) || lineTrim.contains("refused", true) || lineTrim.contains("FATAL_AUTH", true)
 
-                    // 0. FATAL AUTH — мгновенная остановка
+                    // 0. FATAL AUTH — мгновенная остановка (пароль / срок / устройство)
                     if (lineTrim.contains("FATAL_AUTH")) {
-                        val isWrapHandshakeTimeout = lineTrim.contains("DTLS timeout", true) ||
-                            lineTrim.contains("WRAP_AUTH_TIMEOUT", true)
-                        if (isWrapHandshakeTimeout) {
-                            if (activeWorkers.value > 0) {
-                                wrapAuthTimeoutCount = 0
-                                updateLog(
-                                    "wrap_timeout_recovered",
-                                    "[WRAP] Один поток не прошёл handshake, активных=${activeWorkers.value}; повторяем",
-                                    50,
-                                    true
-                                )
-                            } else {
-                                wrapAuthTimeoutCount++
-                                updateLog(
-                                    "wrap_timeout_wait",
-                                    "[WRAP] Handshake не подтвердился, проверяем пароль/сеть ($wrapAuthTimeoutCount)",
-                                    50,
-                                    true
-                                )
-                            }
-                            return@forEachLine
-                        }
-
                         val reason = when {
                             lineTrim.contains("неверный пароль") -> "Неверный пароль подключения"
                             lineTrim.contains("истёк") -> "Срок действия пароля истёк"
@@ -520,10 +586,20 @@ object TunnelManager {
                             wrapAuthTimeoutCount++
                             updateLog(
                                 "wrap_timeout_wait",
-                                "[WRAP] Handshake не подтвердился, проверяем пароль/сеть ($wrapAuthTimeoutCount)",
+                                wrapHandshakeWaitMessage(wrapAuthTimeoutCount),
                                 50,
                                 true
                             )
+                            updateLog(
+                                "wrap_timeout_hint",
+                                "[ПОДСКАЗКА] Проверьте пароль профиля, IP/порт сервера и что wdtt-server запущен. " +
+                                    "Если VK режет UDP — попробуйте другую сеть или меньше потоков.",
+                                50,
+                                true
+                            )
+                            if (activeWorkers.value <= 0) {
+                                failConnectionPipeline(ConnectionStep.DTLS)
+                            }
                         }
                         return@forEachLine
                     }
@@ -615,6 +691,9 @@ object TunnelManager {
                             if (active > 0) {
                                 lastActiveAtMs = now
                                 wrapAuthTimeoutCount = 0
+                                if (connectionPipeline.value.failed == null) {
+                                    finishConnectionPipeline()
+                                }
                             }
                         }
 
@@ -699,31 +778,38 @@ object TunnelManager {
                             updateLog(stableKey, "[КАПЧА WBV] $text", 5, isErr)
                         }
 
-                        lineTrim.contains("Старт") || lineTrim.contains("Ожидайте") ->
+                        lineTrim.contains("Старт") || lineTrim.contains("Ожидайте") -> {
                             updateLog("creds_start", "[ВК] Получение учетных данных...", 2, false)
+                            setConnectionPipelineCurrent(ConnectionStep.VK)
+                        }
                         lineTrim.contains("Креды получены") ->
                             updateLog("creds_lifetime", lineTrim, 2, false)
-                        lineTrim.contains("Креды OK") || lineTrim.contains("Первые креды") ->
+                        lineTrim.contains("Креды OK") || lineTrim.contains("Первые креды") -> {
                             updateLog("creds_ok", "[ВК] Учетные данные проверены ✓", 2, false)
-                        lineTrim.contains("Решаю VK Smart Captcha") ->
+                            advanceConnectionPipeline(ConnectionStep.VK, ConnectionStep.WRAP)
+                        }
+                        lineTrim.contains("Решаю VK Smart Captcha") -> {
                             updateLog("captcha_start", "[КАПЧА] Решение капчи...", 5, false)
-                        lineTrim.contains("Smart Captcha решена") ->
+                            markConnectionPipelineCaptchaRequired()
+                        }
+                        lineTrim.contains("Smart Captcha решена") -> {
                             updateLog("captcha_done", "[КАПЧА] Капча решена ✓", 5, false)
-                        lineTrim.contains("капча не решена") || lineTrim.contains("ошибка решения капчи") ->
+                            advanceConnectionPipeline(ConnectionStep.CAPTCHA, ConnectionStep.WRAP)
+                        }
+                        lineTrim.contains("капча не решена") || lineTrim.contains("ошибка решения капчи") -> {
                             updateLog("captcha_failed", "[КАПЧА] Ошибка решения капчи", 5, true)
-                        lineTrim.contains("DNS для VK:") || lineTrim.contains("Go DNS:") -> {
-                            val text = if (lineTrim.contains("[КЛИЕНТ]")) {
-                                lineTrim
-                            } else if (lineTrim.contains("DNS для VK:")) {
-                                "[КЛИЕНТ] $lineTrim"
-                            } else {
-                                "[КЛИЕНТ] DNS для VK: ${lineTrim.substringAfter("Go DNS:").trim()}"
-                            }
-                            updateLog("go_dns", text, 1, false)
+                            failConnectionPipeline(ConnectionStep.CAPTCHA)
+                        }
+                        lineTrim.contains("DNS для VK:") -> {
+                            // Не дублируем выбор DNS в ленте — достаточно precheck OK/fail.
                         }
                         lineTrim.contains("[WRAP]") -> {
                             val text = lineTrim.substringAfter("[WRAP]").trim()
                             updateLog("wrap_status", "[WRAP] $text", 1, false)
+                            markConnectionPipelineCompleted(ConnectionStep.WRAP)
+                            if (connectionPipeline.value.current?.order == ConnectionStep.WRAP.order) {
+                                setConnectionPipelineCurrent(ConnectionStep.TURN)
+                            }
                         }
                         lineTrim.contains("[TURN]") -> {
                             val text = lineTrim.substringAfter("[TURN]").trim()
@@ -731,38 +817,64 @@ object TunnelManager {
                                 text.contains("не удалось", true) ||
                                 text.contains("неполный ответ", true)
                             updateLog("turn_${text.take(32).hashCode()}", "[TURN] $text", 2, turnError)
+                            if (turnError) {
+                                failConnectionPipeline(ConnectionStep.TURN)
+                            } else {
+                                markConnectionPipelineCompleted(ConnectionStep.TURN)
+                                if ((connectionPipeline.value.current?.order ?: 0) <= ConnectionStep.TURN.order) {
+                                    setConnectionPipelineCurrent(ConnectionStep.TURN)
+                                }
+                            }
                         }
-                        lineTrim.contains("Relay:") ->
+                        lineTrim.contains("Relay:") -> {
+                            advanceConnectionPipeline(ConnectionStep.TURN, ConnectionStep.DTLS)
                             updateLog("dtls_start", "[DTLS] Рукопожатие (Handshake)...", 1, false)
-                        lineTrim.contains("DTLS ОК") ->
+                        }
+                        lineTrim.contains("DTLS ОК") -> {
                             updateLog("dtls_ok", "[DTLS] Соединение установлено ✓", 1, false)
-                        lineTrim.contains("Активна ✓") ->
-                            updateLog("ready", "[READY] Туннель готов к работе ✓", 2, false)
+                            advanceConnectionPipeline(ConnectionStep.DTLS, ConnectionStep.WORKERS)
+                        }
+                        lineTrim.contains("[READY]") -> {
+                            advanceConnectionPipeline(ConnectionStep.WORKERS, ConnectionStep.VPN)
+                        }
                         
                         // Ошибки (в конец)
                         isError -> {
+                            val pipeParts = lineTrim.split(" | ", limit = 2)
+                            val mainLine = pipeParts[0]
+                            val goHint = pipeParts.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }
                             // Формируем уникальный ключ ошибки на основе её типа (группируем по типу ошибки)
                             val errorKey = when {
-                                lineTrim.contains("lookup login.vk.ru", true) -> "err_vk_dns"
-                                lineTrim.contains("connection refused") -> "err_conn_refused"
-                                lineTrim.contains("timeout") -> "err_timeout"
-                                lineTrim.contains("кредов") -> "err_creds"
-                                lineTrim.contains("DTLS") -> "err_dtls"
-                                else -> "general_error_" + lineTrim.take(15).hashCode()
+                                mainLine.contains("lookup login.vk.ru", true) -> "err_vk_dns"
+                                mainLine.contains("connection refused", true) -> "err_conn_refused"
+                                mainLine.contains("timeout", true) || mainLine.contains("context canceled", true) -> "err_timeout"
+                                mainLine.contains("кредов", true) -> "err_creds"
+                                mainLine.contains("DTLS", true) -> "err_dtls"
+                                mainLine.contains("[TURN]", true) -> "err_turn"
+                                mainLine.contains("[ВОРКЕР", true) -> "err_worker"
+                                else -> "general_error_" + mainLine.take(15).hashCode()
                             }
-                            val errorMessage = if (errorKey == "err_vk_dns") {
-                                "[СЕТЬ] DNS до VK недоступен: login.vk.ru — смените DNS в ⚙️ → Сеть"
-                            } else {
-                                lineTrim
+                            val errorMessage = when (errorKey) {
+                                "err_vk_dns" ->
+                                    "[СЕТЬ] DNS до VK недоступен: login.vk.ru — смените DNS в ⚙️ → Сеть"
+                                "err_dtls", "err_worker" -> shortenWorkerError(mainLine)
+                                else -> mainLine
                             }
                             updateLog(errorKey, errorMessage, 99, true)
+                            val hint = goHint ?: connectionErrorHint(mainLine)
+                            if (hint != null) {
+                                updateLog("${errorKey}_hint", "[ПОДСКАЗКА] $hint", 99, true)
+                            }
                             if (errorKey == "err_vk_dns") {
+                                failConnectionPipeline(ConnectionStep.DNS)
                                 updateLog(
                                     "go_dns_tip",
                                     "[СЕТЬ] Откройте ⚙️ → Сеть и выберите другой DNS (Яндекс / Cloudflare / Google / Свой)",
                                     99,
                                     true
                                 )
+                            } else if (errorKey == "err_dtls" || errorKey == "err_worker" || errorKey == "err_timeout") {
+                                failConnectionPipeline(ConnectionStep.DTLS)
                             }
                         }
                     }
@@ -771,6 +883,7 @@ object TunnelManager {
                     if (line.contains("╔") && line.contains("WireGuard")) {
                         collectingConfig = true
                         configBuilder.clear()
+                        setConnectionPipelineCurrent(ConnectionStep.VPN)
                         return@forEachLine
                     } else if (collectingConfig) {
                         if (line.contains("╚")) {
@@ -781,7 +894,10 @@ object TunnelManager {
                             scope.launch(Dispatchers.Main) {
                                 try {
                                     wgHelper?.startTunnel(configStr)
+                                    markConnectionPipelineCompleted(ConnectionStep.VPN)
+                                    finishConnectionPipeline()
                                 } catch (e: Exception) {
+                                    failConnectionPipeline(ConnectionStep.VPN)
                                     updateLog("vpn_start_error", "Ошибка запуска VPN: ${e.readableMessage()}", 99, true)
                                 }
                             }
@@ -800,19 +916,25 @@ object TunnelManager {
                     }
                 }
             } catch (e: Exception) {
-                updateLog("sys_error", "Процесс остановлен: ${e.message}", -1, true)
+                if (!transportRestartInProgress) {
+                    updateLog("sys_error", "Процесс остановлен: ${e.message}", -1, true)
+                }
             } finally {
                 // Если процесс умер сам, ловим код выхода
                 try {
                     val exitCode = process?.exitValue()
-                    if (exitCode != null && exitCode != 0) {
+                    if (exitCode != null && exitCode != 0 && !transportRestartInProgress) {
                         updateLog("sys_exit", "Процесс крашнулся с кодом $exitCode", 99, true)
                     }
                 } catch (_: IllegalThreadStateException) {
-                    process?.destroy()
+                    if (!transportRestartInProgress) {
+                        process?.destroy()
+                    }
                 }
-                markRunning(false)
                 process = null
+                if (!transportRestartInProgress) {
+                    markRunning(false)
+                }
             }
         }
     }
@@ -920,15 +1042,18 @@ object TunnelManager {
     fun reconnectAll(reason: String) {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
-        if (!running.value) return
 
         scope.launch {
             reconnectMutex.withLock {
                 val now = System.currentTimeMillis()
-                if (now - lastReconnectAtMs < MIN_RECONNECT_INTERVAL_MS) return@launch
+                if (now - lastReconnectAtMs < MIN_RECONNECT_INTERVAL_MS) {
+                    updateLog("reconnect_skip", "Переподключение уже выполняется…", 50, false)
+                    return@launch
+                }
                 lastReconnectAtMs = now
 
                 isReconnecting.value = true
+                transportRestartInProgress = true
                 updateLog("reconnect", "🔄 Переподключение ($reason)...", 50, false)
                 try {
                     withContext(Dispatchers.IO) {
@@ -939,10 +1064,15 @@ object TunnelManager {
                             wgHelper?.reloadTunnel()
                         }
                     }
-                    if (running.value) {
-                        start(context, params, isSwitching = true)
-                    }
+                    start(context, params, isSwitching = true)
+                    startJob?.join()
+                } catch (e: CancellationException) {
+                    transportRestartInProgress = false
+                    throw e
+                } catch (e: Exception) {
+                    handleReconnectFailed(e.message ?: e::class.java.simpleName)
                 } finally {
+                    transportRestartInProgress = false
                     isReconnecting.value = false
                 }
             }
@@ -1099,6 +1229,12 @@ object TunnelManager {
         markRunning(false)
         isConnecting.value = false
         activeWorkers.value = 0
+        // При ошибке шага оставляем схему с крестиком; иначе прячем.
+        if (connectionPipeline.value.failed == null) {
+            hideConnectionPipeline()
+        } else {
+            cancelPipelineStepTimeout()
+        }
         currentParams = null
         ManlCaptchaWebViewManager.cancelCaptcha()
     }
@@ -1286,6 +1422,249 @@ object TunnelManager {
     private fun Throwable.readableMessage(): String {
         val text = message ?: localizedMessage
         return if (text.isNullOrBlank()) this::class.java.simpleName else "${this::class.java.simpleName}: $text"
+    }
+
+    private fun resetConnectionPipeline() {
+        pipelineHideJob?.cancel()
+        pipelineHideJob = null
+        cancelPipelineStepTimeout()
+        if (!isConnectionPipelineEnabled) {
+            connectionPipeline.value = ConnectionPipelineState()
+            return
+        }
+        connectionPipeline.value = ConnectionPipelineState(
+            current = ConnectionStep.DNS,
+            completed = emptySet(),
+            visible = true,
+        )
+        armPipelineStepTimeout(ConnectionStep.DNS)
+    }
+
+    private fun hideConnectionPipeline() {
+        pipelineHideJob?.cancel()
+        pipelineHideJob = null
+        cancelPipelineStepTimeout()
+        connectionPipeline.value = ConnectionPipelineState()
+    }
+
+    private fun scheduleHideConnectionPipeline() {
+        pipelineHideJob?.cancel()
+        pipelineHideJob = scope.launch {
+            delay(PIPELINE_HIDE_AFTER_SUCCESS_MS)
+            val state = connectionPipeline.value
+            if (state.visible && state.failed == null && state.current == ConnectionStep.DONE) {
+                connectionPipeline.value = ConnectionPipelineState()
+            }
+        }
+    }
+
+    private fun cancelPipelineStepTimeout() {
+        pipelineStepTimeoutJob?.cancel()
+        pipelineStepTimeoutJob = null
+    }
+
+    private fun pipelineTimeoutFor(step: ConnectionStep): Long =
+        if (step == ConnectionStep.VK) PIPELINE_VK_STEP_TIMEOUT_MS else PIPELINE_STEP_TIMEOUT_MS
+
+    private fun armPipelineStepTimeout(step: ConnectionStep?) {
+        cancelPipelineStepTimeout()
+        if (step == null || step == ConnectionStep.DONE) return
+        // Много потоков поднимаются постепенно; капча может ждать пользователя.
+        if (step == ConnectionStep.WORKERS || step == ConnectionStep.CAPTCHA) return
+
+        val timeoutMs = pipelineTimeoutFor(step)
+        pipelineStepTimeoutJob = scope.launch {
+            delay(timeoutMs)
+            val state = connectionPipeline.value
+            if (!state.visible || state.failed != null || state.current != step) return@launch
+            onPipelineStepTimeout(step, timeoutMs)
+        }
+    }
+
+    private fun onPipelineStepTimeout(step: ConnectionStep, timeoutMs: Long = pipelineTimeoutFor(step)) {
+        cancelPipelineStepTimeout()
+        pipelineHideJob?.cancel()
+        pipelineHideJob = null
+        connectionPipeline.update { state ->
+            if (!state.visible) {
+                state
+            } else {
+                state.copy(failed = step, timedOut = true, current = step, timeoutSec = (timeoutMs / 1000L).toInt())
+            }
+        }
+        updateLog(
+            "pipeline_timeout",
+            "[СХЕМА] Шаг «${step.label}» не завершился за ${timeoutMs / 1000} с — подключение остановлено",
+            99,
+            true
+        )
+        startJob?.cancel()
+        startJob = null
+        if (running.value || process != null) {
+            scope.launch(Dispatchers.Main) {
+                wgHelper?.stopTunnel()
+            }
+            killProcess()
+            markRunning(false)
+            isConnecting.value = false
+            activeWorkers.value = 0
+            currentParams = null
+            runCatching { ManlCaptchaWebViewManager.cancelCaptcha() }
+        } else {
+            finishConnectingFailed()
+        }
+    }
+
+    private fun setConnectionPipelineCurrent(step: ConnectionStep) {
+        connectionPipeline.update { state ->
+            if (!state.visible) state else state.copy(current = step, failed = null, timedOut = false)
+        }
+        armPipelineStepTimeout(step)
+    }
+
+    private fun markConnectionPipelineCompleted(step: ConnectionStep) {
+        connectionPipeline.update { state ->
+            if (!state.visible) {
+                state
+            } else {
+                state.copy(completed = state.completed + step, failed = null, timedOut = false)
+            }
+        }
+    }
+
+    private fun markConnectionPipelineCaptchaRequired() {
+        connectionPipeline.update { state ->
+            if (!state.visible) {
+                state
+            } else {
+                state.copy(
+                    captchaRequired = true,
+                    current = ConnectionStep.CAPTCHA,
+                    failed = null,
+                    timedOut = false,
+                )
+            }
+        }
+        armPipelineStepTimeout(ConnectionStep.CAPTCHA)
+    }
+
+    private fun advanceConnectionPipeline(completed: ConnectionStep, next: ConnectionStep) {
+        connectionPipeline.update { state ->
+            if (!state.visible) {
+                state
+            } else {
+                state.copy(
+                    completed = state.completed + completed,
+                    current = next,
+                    failed = null,
+                    timedOut = false,
+                )
+            }
+        }
+        armPipelineStepTimeout(next)
+    }
+
+    private fun failConnectionPipeline(step: ConnectionStep) {
+        pipelineHideJob?.cancel()
+        pipelineHideJob = null
+        cancelPipelineStepTimeout()
+        connectionPipeline.update { state ->
+            if (!state.visible) state else state.copy(failed = step, timedOut = false)
+        }
+    }
+
+    private fun finishConnectionPipeline() {
+        var shouldScheduleHide = false
+        connectionPipeline.update { state ->
+            if (!state.visible) {
+                state
+            } else if (state.current == ConnectionStep.DONE && state.failed == null) {
+                state
+            } else {
+                shouldScheduleHide = true
+                val doneSteps = state.stepsToShow().toSet() + ConnectionStep.DONE
+                state.copy(
+                    current = ConnectionStep.DONE,
+                    completed = doneSteps,
+                    failed = null,
+                    timedOut = false,
+                )
+            }
+        }
+        cancelPipelineStepTimeout()
+        if (shouldScheduleHide) {
+            scheduleHideConnectionPipeline()
+        }
+    }
+
+    private fun wrapHandshakeWaitMessage(count: Int): String =
+        "[WRAP] Handshake не подтвердился ($count). " +
+            "Возможно: неверный пароль, сервер недоступен, UDP режет оператор или wdtt-server не запущен"
+
+    private fun shortenWorkerError(line: String): String {
+        val attempt = Regex("попытка\\s+(\\d+)", RegexOption.IGNORE_CASE)
+            .find(line)?.groupValues?.getOrNull(1)
+        val worker = Regex("#(\\d+)").find(line)?.groupValues?.getOrNull(1)
+        val prefix = buildString {
+            append("[ВОРКЕР")
+            if (worker != null) append(" #$worker")
+            append("] ")
+        }
+        val lower = line.lowercase()
+        val core = when {
+            lower.contains("wrap_auth_timeout") || lower.contains("dtls timeout") ->
+                "WRAP/DTLS не подтверждён"
+            lower.contains("context canceled") ->
+                "DTLS handshake прерван"
+            lower.contains("connection refused") ->
+                "сервер отклонил подключение"
+            lower.contains("connection reset") ->
+                "сервер сбросил соединение"
+            lower.contains("timeout") || lower.contains("deadline") ->
+                "таймаут DTLS handshake"
+            lower.contains("turn квота") || lower.contains("quota") ->
+                "исчерпана квота TURN"
+            lower.contains("turn allocate") ->
+                "ошибка TURN Allocate"
+            lower.contains("[turn]") ->
+                line.substringAfter("[TURN]", line).trim().take(96)
+            else ->
+                line.substringAfter(": ", line).take(96)
+        }
+        return buildString {
+            append(prefix)
+            append(core)
+            if (attempt != null) append(" (попытка $attempt)")
+        }
+    }
+
+    private fun connectionErrorHint(line: String): String? {
+        val lower = line.lowercase()
+        return when {
+            lower.contains("wrap_auth_timeout") || lower.contains("dtls timeout") ->
+                "Сервер не ответил на WRAP/DTLS — проверьте пароль профиля, IP/порт VPS и что wdtt-server запущен"
+            lower.contains("context canceled") ->
+                "Соединение прервано до handshake — часто сервер недоступен, UDP режет оператор или сменилась сеть"
+            lower.contains("connection refused") ->
+                "Сервер отклонил подключение — проверьте IP, порт DTLS и что wdtt-server запущен на VPS"
+            lower.contains("connection reset") ->
+                "Сервер сбросил соединение — возможен неверный пароль WRAP или перезапуск wdtt-server"
+            lower.contains("no route") || lower.contains("network is unreachable") ->
+                "Нет маршрута до сервера — проверьте интернет; отключите другие VPN/прокси"
+            lower.contains("lookup") || lower.contains("no such host") ->
+                "DNS не резолвит адрес — смените DNS в ⚙️ → Сеть"
+            lower.contains("turn квота") || lower.contains("quota") || lower.contains("486") ->
+                "VK исчерпал TURN-слоты — уменьшите число потоков или смените VK-хеш"
+            lower.contains("turn allocate") ->
+                "Ошибка TURN relay — VK может резать UDP; попробуйте другой хеш или режим капчи"
+            lower.contains("rate limit") || lower.contains("flood") || lower.contains("error 29") ->
+                "VK временно ограничил запросы — подождите или смените IP/хеш"
+            lower.contains("rtp aead") || lower.contains("auth failed") ->
+                "Ошибка WRAP/RTP — неверный пароль или несовместимая версия сервера"
+            lower.contains("timeout") || lower.contains("deadline") ->
+                "Таймаут — сервер не отвечает, проверьте доступность VPS и пароль"
+            else -> null
+        }
     }
 }
 

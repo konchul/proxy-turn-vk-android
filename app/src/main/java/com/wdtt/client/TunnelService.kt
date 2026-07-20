@@ -444,6 +444,10 @@ class TunnelService : Service() {
             try {
                 while (isActive) {
                     if (!TunnelManager.running.value && !isTunnelPaused) {
+                        if (TunnelManager.isReconnecting.value || TunnelManager.transportRestartInProgress) {
+                            delay(2000)
+                            continue
+                        }
                         // Туннель полностью остановлен (не на паузе) — убиваем сервис
                         stopSelf()
                         break

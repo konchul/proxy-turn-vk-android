@@ -74,6 +74,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".VpnPermissionActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <service
             android:name=".TunnelService"
             android:exported="false"

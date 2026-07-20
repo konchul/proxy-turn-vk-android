@@ -94,6 +94,8 @@ class SettingsStore(context: Context) {
         // ═══ VPN Exclusions Mode ═══
         private val IS_WHITELIST = booleanPreferencesKey("is_whitelist")
         private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
+        /** Российские IPv4-подсети не идут через WireGuard (AllowedIPs без RU). */
+        private val RUNET_DIRECT = booleanPreferencesKey("runet_direct")
 
         // ═══ Theme Mode ═══
         private val THEME_MODE = stringPreferencesKey("theme_mode") // "system", "light", "dark"
@@ -123,6 +125,7 @@ class SettingsStore(context: Context) {
         // ═══ Поведение ═══
         private val AUTO_SWITCH_TO_LOGS = booleanPreferencesKey("auto_switch_to_logs")
         private val STOP_ON_WIFI = booleanPreferencesKey("stop_on_wifi")
+        private val CONNECTION_PIPELINE_ENABLED = booleanPreferencesKey("connection_pipeline_enabled")
         private val SORT_PROFILES_BY_PING = booleanPreferencesKey("sort_profiles_by_ping")
         /** -1 = выкл, 0 = при каждом открытии, иначе интервал в часах (6/12/24). */
         private val SUB_AUTO_REFRESH_HOURS = intPreferencesKey("sub_auto_refresh_hours")
@@ -238,12 +241,6 @@ class SettingsStore(context: Context) {
             }
         }
 
-        fun formatGoDnsLogLine(info: GoDnsDisplay): String {
-            val servers = if (info.servers.isEmpty()) "не задан" else info.servers.joinToString(", ")
-            val proto = if (isDohGoDnsPreset(info.preset)) "DoH" else "UDP/TCP :53"
-            return "[КЛИЕНТ] DNS для VK: ${info.title} ($servers) — $proto"
-        }
-
         suspend fun resolveGoDnsArg(context: Context): String {
             awaitMigrations(context)
             val store = SettingsStore(context)
@@ -356,6 +353,7 @@ class SettingsStore(context: Context) {
 
     // ═══ VPN Exclusions Mode ═══
     val isWhitelist: Flow<Boolean> = dataStore.data.map { it[IS_WHITELIST] ?: false }
+    val runetDirect: Flow<Boolean> = dataStore.data.map { it[RUNET_DIRECT] ?: false }
 
     // ═══ Theme Mode ═══
     val hasSeenWelcomeDialog: Flow<Boolean> = dataStore.data
@@ -393,6 +391,8 @@ class SettingsStore(context: Context) {
     // ═══ Поведение ═══
     val autoSwitchToLogs: Flow<Boolean> = dataStore.data.map { it[AUTO_SWITCH_TO_LOGS] ?: true }
     val stopOnWifi: Flow<Boolean> = dataStore.data.map { it[STOP_ON_WIFI] ?: false }
+    /** Схема этапов подключения на вкладке «Логи». По умолчанию включена. */
+    val connectionPipelineEnabled: Flow<Boolean> = dataStore.data.map { it[CONNECTION_PIPELINE_ENABLED] ?: true }
     val sortProfilesByPing: Flow<Boolean> = dataStore.data.map { it[SORT_PROFILES_BY_PING] ?: false }
     val subscriptionAutoRefreshHours: Flow<Int> = dataStore.data.map {
         it[SUB_AUTO_REFRESH_HOURS] ?: DEFAULT_SUB_AUTO_REFRESH_HOURS
@@ -404,6 +404,10 @@ class SettingsStore(context: Context) {
 
     suspend fun saveStopOnWifi(enabled: Boolean) {
         dataStore.edit { prefs -> prefs[STOP_ON_WIFI] = enabled }
+    }
+
+    suspend fun saveConnectionPipelineEnabled(enabled: Boolean) {
+        dataStore.edit { prefs -> prefs[CONNECTION_PIPELINE_ENABLED] = enabled }
     }
 
     suspend fun saveSubscriptionAutoRefreshHours(hours: Int) {
@@ -691,6 +695,10 @@ class SettingsStore(context: Context) {
     }
 
     // Атомарное сохранение обоих параметров для исключения гонки при перезагрузке
+    suspend fun saveRunetDirect(enabled: Boolean) {
+        dataStore.edit { prefs -> prefs[RUNET_DIRECT] = enabled }
+    }
+
     suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) {
         dataStore.edit { prefs ->
             prefs[EXCLUDED_APPS] = packages

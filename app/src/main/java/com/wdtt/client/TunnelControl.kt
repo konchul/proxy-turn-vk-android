@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-object TunnelControl {
+object  TunnelControl {
 
     fun toggle(context: Context) {
         if (TunnelManager.running.value) {
