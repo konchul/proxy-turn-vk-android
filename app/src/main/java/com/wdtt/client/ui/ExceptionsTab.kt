@@ -1,13 +1,6 @@
 package com.wdtt.client.ui
 
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -16,8 +9,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -287,14 +278,6 @@ fun ExceptionsTab() {
             }
         }
 
-        AnimatedVisibility(
-            visible = isWhitelist,
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically(),
-        ) {
-            WhitelistAlternativesCard(context = context)
-        }
-
         // List
         if (!isMigrationReady || isLoading) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -327,78 +310,6 @@ fun ExceptionsTab() {
                         }
                     )
                 }
-            }
-        }
-    }
-}
-
-private const val EXCLAVE_RELEASES_URL = "https://github.com/ExclaveNetwork/Exclave/releases"
-private const val V2RAYNG_RELEASES_URL = "https://github.com/2dust/v2rayNG/releases"
-
-@Composable
-private fun WhitelistAlternativesCard(context: android.content.Context) {
-    fun openUrl(url: String) {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-    }
-
-    AppSectionCard(
-        modifier = Modifier.padding(bottom = 12.dp),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-    ) {
-        Row(verticalAlignment = Alignment.Top) {
-            Icon(
-                imageVector = Icons.Default.Info,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp),
-            )
-            Spacer(Modifier.width(10.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    "БС на Android",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    "Белый список работает не на всех прошивках одинаково. " +
-                        "Если нужное приложение не ходит через qWDTT или обход нестабилен — " +
-                        "попробуйте тот же профиль в другом клиенте:",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    lineHeight = 16.sp,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = { openUrl(EXCLAVE_RELEASES_URL) },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        Icon(Icons.Default.OpenInNew, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Exclave", style = MaterialTheme.typography.labelMedium)
-                    }
-                    OutlinedButton(
-                        onClick = { openUrl(V2RAYNG_RELEASES_URL) },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        Icon(Icons.Default.OpenInNew, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("v2rayNG", style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-                Text(
-                    "Скачайте APK с GitHub, импортируйте конфиг и проверьте тот же сервер. " +
-                        "Если в одном клиенте не работает — часто помогает другой.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    lineHeight = 16.sp,
-                )
             }
         }
     }
