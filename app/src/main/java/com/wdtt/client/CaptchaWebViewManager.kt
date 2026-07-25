@@ -9,8 +9,6 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.webkit.JavascriptInterface
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient

@@ -1,6 +1,5 @@
 package com.wdtt.client
 
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -15,7 +14,6 @@ import androidx.activity.compose.setContent
 import androidx.core.app.NotificationCompat
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -37,7 +35,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.random.Random
 
 object ManlCaptchaWebViewManager {
     private const val TAG = "ManlCaptchaWV"

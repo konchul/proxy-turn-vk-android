@@ -160,18 +160,6 @@ object TunnelManager {
         stop(force = true)
     }
 
-    fun startForced() {
-        android.util.Log.d("WDTT", "startForced() called")
-        val ctx = lastContext?.get()
-        val params = currentParams
-        android.util.Log.d("WDTT", "startForced: ctx=$ctx, params=$params")
-        if (ctx != null && params != null) {
-            start(ctx, params, isSwitching = false, forceStart = true)
-        } else {
-            android.util.Log.e("WDTT", "startForced failed: ctx or params is null")
-        }
-    }
-
     fun clearUnreadErrors() {
         unreadErrorCount.value = 0
     }
@@ -247,6 +235,7 @@ object TunnelManager {
         if (!isSwitching) {
             clearLogs()
             // Флаг обновится в startJob через first()/collect; пока — кэш.
+            currentParams = params
             resetConnectionPipeline()
             config.value = null
             connectingStartedAtMs = System.currentTimeMillis()
@@ -276,7 +265,6 @@ object TunnelManager {
             lastActiveAtMs = 0L
             lastStatsReceivedAtMs = 0L
             activeHashIndex = 0
-            currentParams = params
             lastContext = java.lang.ref.WeakReference(appContext)
             forceRegenerateUA = false
             currentCaptchaMode = params.captchaMode
@@ -403,6 +391,18 @@ object TunnelManager {
                     1,
                     false
                 )
+
+                val mode = SettingsStore.normalizeConnectionMode(params.connectionMode)
+                cmd.add("-mode")
+                cmd.add(mode)
+                if (mode == SettingsStore.CONNECTION_MODE_SOCKS) {
+                    val socks = params.socksListenAddress
+                    cmd.add("-socks")
+                    cmd.add(socks)
+                    updateLog("conn_mode", "[СЕТЬ] Режим: SOCKS5 ($socks), без VPN", 1, false)
+                } else {
+                    updateLog("conn_mode", "[СЕТЬ] Режим: VPN (WireGuard)", 1, false)
+                }
 
                 setConnectionPipelineCurrent(ConnectionStep.DNS)
                 val dnsProbe = GoDnsProbe.check(params.goDnsArg)
@@ -556,6 +556,11 @@ object TunnelManager {
                     // Чистим лог от даты из Go (например, "2023/10/24 12:34:56.123456 [ВОРКЕР...")
                     val msgPrefixReplaced = line.replace(Regex("^\\d{4}/\\d{2}/\\d{2}\\s\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?\\s"), "")
                     val lineTrim = msgPrefixReplaced.trim()
+
+                    // SOCKS IPv6: туннель только IPv4 — клиент сам уйдёт на A-запись.
+                    if (isBenignSocksIpv6Noise(lineTrim)) {
+                        return@forEachLine
+                    }
 
                     val isError = lineTrim.contains("Ошибка", true) || lineTrim.contains("error", true) || lineTrim.contains("FAIL", true) || lineTrim.contains("timeout", true) || lineTrim.contains("refused", true) || lineTrim.contains("FATAL_AUTH", true)
 
@@ -835,7 +840,7 @@ object TunnelManager {
                             advanceConnectionPipeline(ConnectionStep.DTLS, ConnectionStep.WORKERS)
                         }
                         lineTrim.contains("[READY]") -> {
-                            advanceConnectionPipeline(ConnectionStep.WORKERS, ConnectionStep.VPN)
+                            advanceConnectionPipeline(ConnectionStep.WORKERS, transportPipelineStep())
                         }
                         
                         // Ошибки (в конец)
@@ -883,22 +888,42 @@ object TunnelManager {
                     if (line.contains("╔") && line.contains("WireGuard")) {
                         collectingConfig = true
                         configBuilder.clear()
-                        setConnectionPipelineCurrent(ConnectionStep.VPN)
+                        setConnectionPipelineCurrent(transportPipelineStep())
+                        return@forEachLine
+                    } else if (lineTrim.contains("[SOCKS] listening")) {
+                        updateLog(
+                            "socks_ready",
+                            "[SOCKS] listening ${currentParams?.socksListenAddress ?: lineTrim.substringAfter("listening").trim()}",
+                            1,
+                            false
+                        )
+                        markConnectionPipelineCompleted(ConnectionStep.SOCKS)
+                        finishConnectionPipeline()
+                        stats.value = currentParams?.socksListenAddress?.let { "SOCKS $it" } ?: "SOCKS активен"
+                        return@forEachLine
+                    } else if (lineTrim.contains("[SOCKS] Ошибка") || lineTrim.contains("[SOCKS] Сервер остановлен")) {
+                        failConnectionPipeline(ConnectionStep.SOCKS)
+                        updateLog("socks_error", lineTrim, 99, true)
                         return@forEachLine
                     } else if (collectingConfig) {
                         if (line.contains("╚")) {
                             collectingConfig = false
                             val configStr = configBuilder.toString().trim()
                             config.value = configStr
-                            
-                            scope.launch(Dispatchers.Main) {
-                                try {
-                                    wgHelper?.startTunnel(configStr)
-                                    markConnectionPipelineCompleted(ConnectionStep.VPN)
-                                    finishConnectionPipeline()
-                                } catch (e: Exception) {
-                                    failConnectionPipeline(ConnectionStep.VPN)
-                                    updateLog("vpn_start_error", "Ошибка запуска VPN: ${e.readableMessage()}", 99, true)
+
+                            if (currentParams?.isSocksMode == true) {
+                                // Userspace WG + SOCKS поднимает Go; Android VPN не трогаем.
+                                updateLog("socks_wg_conf", "[SOCKS] Конфиг получен, ждём локальный прокси…", 1, false)
+                            } else {
+                                scope.launch(Dispatchers.Main) {
+                                    try {
+                                        wgHelper?.startTunnel(configStr)
+                                        markConnectionPipelineCompleted(ConnectionStep.VPN)
+                                        finishConnectionPipeline()
+                                    } catch (e: Exception) {
+                                        failConnectionPipeline(ConnectionStep.VPN)
+                                        updateLog("vpn_start_error", "Ошибка запуска VPN: ${e.readableMessage()}", 99, true)
+                                    }
                                 }
                             }
                         } else if (line.contains("║")) {
@@ -1060,7 +1085,7 @@ object TunnelManager {
                         ensureTransportStopped(params.port)
                     }
                     withContext(Dispatchers.Main) {
-                        if (config.value != null) {
+                        if (config.value != null && params.isSocksMode.not()) {
                             wgHelper?.reloadTunnel()
                         }
                     }
@@ -1092,7 +1117,7 @@ object TunnelManager {
                 isReconnecting.value = true
                 try {
                     withContext(Dispatchers.Main) {
-                        if (config.value != null) {
+                        if (config.value != null && currentParams?.isSocksMode != true) {
                             wgHelper?.reloadTunnel()
                         }
                     }
@@ -1240,7 +1265,7 @@ object TunnelManager {
     }
 
     fun reloadWireGuard() {
-        if (running.value) {
+        if (running.value && currentParams?.isSocksMode != true) {
             scope.launch {
                 wgHelper?.reloadTunnel()
             }
@@ -1436,9 +1461,18 @@ object TunnelManager {
             current = ConnectionStep.DNS,
             completed = emptySet(),
             visible = true,
+            socksMode = currentParams?.isSocksMode == true,
         )
         armPipelineStepTimeout(ConnectionStep.DNS)
     }
+
+    private fun transportPipelineStep(): ConnectionStep =
+        if (currentParams?.isSocksMode == true) ConnectionStep.SOCKS else ConnectionStep.VPN
+
+    fun isSocksModeActive(): Boolean = currentParams?.isSocksMode == true
+
+    fun activeSocksListenAddress(): String? =
+        currentParams?.takeIf { it.isSocksMode }?.socksListenAddress
 
     private fun hideConnectionPipeline() {
         pipelineHideJob?.cancel()
@@ -1463,14 +1497,18 @@ object TunnelManager {
         pipelineStepTimeoutJob = null
     }
 
+    private fun isAccountVkAuthActive(): Boolean =
+        currentParams?.vkAuthMode?.equals("anonymous", ignoreCase = true) == false
+
     private fun pipelineTimeoutFor(step: ConnectionStep): Long =
         if (step == ConnectionStep.VK) PIPELINE_VK_STEP_TIMEOUT_MS else PIPELINE_STEP_TIMEOUT_MS
 
     private fun armPipelineStepTimeout(step: ConnectionStep?) {
         cancelPipelineStepTimeout()
         if (step == null || step == ConnectionStep.DONE) return
-        // Много потоков поднимаются постепенно; капча может ждать пользователя.
+        // Много потоков поднимаются постепенно; капча / вход по аккаунту VK ждут пользователя.
         if (step == ConnectionStep.WORKERS || step == ConnectionStep.CAPTCHA) return
+        if (step == ConnectionStep.VK && isAccountVkAuthActive()) return
 
         val timeoutMs = pipelineTimeoutFor(step)
         pipelineStepTimeoutJob = scope.launch {
@@ -1638,8 +1676,23 @@ object TunnelManager {
         }
     }
 
+    private fun isBenignSocksIpv6Noise(line: String): Boolean {
+        val lower = line.lowercase()
+        if (!lower.contains("socks")) return false
+        if (lower.contains("blocked by rules")) return true
+        if (lower.contains("ipv6 skipped") || lower.contains("ipv6")) return true
+        // Connect to [2001:…] / :: … no route
+        val looksIpv6 = line.contains("::") || (line.contains('[') && line.contains(']') && line.contains(':'))
+        return looksIpv6 && (
+            lower.contains("no route") ||
+                lower.contains("failed to handle") ||
+                lower.contains("connect to")
+            )
+    }
+
     private fun connectionErrorHint(line: String): String? {
         val lower = line.lowercase()
+        if (isBenignSocksIpv6Noise(line)) return null
         return when {
             lower.contains("wrap_auth_timeout") || lower.contains("dtls timeout") ->
                 "Сервер не ответил на WRAP/DTLS — проверьте пароль профиля, IP/порт VPS и что wdtt-server запущен"
@@ -1683,5 +1736,13 @@ data class TunnelParams(
     val vkAnonPath: String = "vkcalls", // "vkcalls" или "legacy" (только anonymous)
     val goDnsArg: String = "yandex", // yandex/cloudflare/google, doh-*, custom:IP, doh:URL
     val obfsMode: String = "audio", // "audio" or "video"
+    val connectionMode: String = SettingsStore.CONNECTION_MODE_VPN, // vpn | socks
+    val socksPort: Int = SettingsStore.DEFAULT_SOCKS_PORT,
     val detailedLogs: Boolean = false
-)
+) {
+    val isSocksMode: Boolean
+        get() = SettingsStore.normalizeConnectionMode(connectionMode) == SettingsStore.CONNECTION_MODE_SOCKS
+
+    val socksListenAddress: String
+        get() = SettingsStore.socksListenAddress(socksPort)
+}

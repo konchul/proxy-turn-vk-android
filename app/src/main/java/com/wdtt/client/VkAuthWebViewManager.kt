@@ -24,6 +24,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.net.http.SslError
 import android.os.Message
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -64,6 +65,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -75,6 +77,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.coroutines.resume
 
 data class VkTurnCreds(
     val username: String,
@@ -146,9 +149,10 @@ private object VkAuthJoinScripts {
 
     const val AUTO_JOIN_SETUP = """
         (function() {
-            if (window.__wdtt_auto_join_ready) return;
+            // Всегда переустанавливаем хелперы: после bfcache/SPA ready мог остаться true,
+            // а __wdtt_autoJoinTry — устаревшим → тихий режим «кнопка не найдена» со 2-го раза.
             window.__wdtt_auto_join_ready = true;
-            window.__wdtt_auto_join_clicks = 0;
+            window.__wdtt_auto_join_clicks = window.__wdtt_auto_join_clicks || 0;
             window.__wdtt_auto_join_done = false;
 
             var rejectPhrases = [
@@ -179,8 +183,12 @@ private object VkAuthJoinScripts {
                 if (text === 'продолжить в браузере' || text === 'continue in browser') return 100;
                 if (text.indexOf('продолжить в браузере') !== -1) return 90 - Math.min(text.length, 80);
                 if (text.indexOf('continue in browser') !== -1) return 85 - Math.min(text.length, 80);
+                // Актуальная кнопка на m.vk: «Присоединиться»
+                if (text === 'присоединиться' || text === 'join') return 95;
                 if (text.indexOf('присоединиться к звонку через браузер') !== -1) return 70;
                 if (text.indexOf('присоединиться через браузер') !== -1) return 65;
+                if (text.indexOf('присоединиться к звонку') !== -1) return 60;
+                if (text.indexOf('присоединиться') !== -1 && text.length <= 40) return 55;
                 if (text.indexOf('войти в звонок') !== -1) return 50;
                 if (text === 'продолжить' || text === 'continue') return 40;
                 if (text.indexOf('продолжить') !== -1 && text.length <= 25) return 35;
@@ -219,6 +227,7 @@ private object VkAuthJoinScripts {
             }
 
             function fireClick(el) {
+                try { el.scrollIntoView({block:'center', inline:'nearest'}); } catch (e0) {}
                 try { el.click(); } catch (e1) {}
                 try {
                     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
@@ -226,35 +235,49 @@ private object VkAuthJoinScripts {
             }
 
             window.__wdtt_autoJoinTry = function() {
+                // Не блокируем навсегда: клик мог попасть в пустоту / SPA ещё не готова.
                 if (window.__wdtt_auto_join_done) return '';
                 var pick = pickBest(50) || pickBest(35);
                 if (!pick) return '';
                 fireClick(pick.el);
                 window.__wdtt_auto_join_clicks = (window.__wdtt_auto_join_clicks || 0) + 1;
                 window.__wdtt_auto_join_done = true;
+                setTimeout(function() { window.__wdtt_auto_join_done = false; }, 2200);
                 return 'clicked(score=' + pick.score + '):' + pick.text.substring(0, 60);
             };
 
-            if (!window.__wdtt_auto_join_observer) {
-                window.__wdtt_auto_join_observer = new MutationObserver(function() {
-                    window.__wdtt_autoJoinTry();
-                });
-                var root = document.documentElement || document.body;
-                if (root) {
-                    window.__wdtt_auto_join_observer.observe(root, { childList: true, subtree: true });
+            try {
+                if (window.__wdtt_auto_join_observer) {
+                    window.__wdtt_auto_join_observer.disconnect();
                 }
-                setTimeout(function() {
-                    try { window.__wdtt_auto_join_observer.disconnect(); } catch(e) {}
-                }, 45000);
+            } catch (e) {}
+            window.__wdtt_auto_join_observer = new MutationObserver(function() {
+                try { window.__wdtt_autoJoinTry(); } catch (e) {}
+            });
+            var root = document.documentElement || document.body;
+            if (root) {
+                window.__wdtt_auto_join_observer.observe(root, { childList: true, subtree: true });
             }
+            setTimeout(function() {
+                try { window.__wdtt_auto_join_observer && window.__wdtt_auto_join_observer.disconnect(); } catch(e) {}
+            }, 45000);
+            return 'ready';
         })();
     """
 
     const val AUTO_JOIN_TRY =
         "(function(){ return (window.__wdtt_autoJoinTry && window.__wdtt_autoJoinTry()) || ''; })();"
 
-    const val AUTO_JOIN_RESET =
-        "window.__wdtt_auto_join_clicks=0; window.__wdtt_auto_join_ready=false; window.__wdtt_auto_join_done=false;"
+    const val AUTO_JOIN_RESET = """
+        (function(){
+            try { if (window.__wdtt_auto_join_observer) window.__wdtt_auto_join_observer.disconnect(); } catch(e) {}
+            window.__wdtt_auto_join_observer = null;
+            window.__wdtt_auto_join_clicks = 0;
+            window.__wdtt_auto_join_ready = false;
+            window.__wdtt_auto_join_done = false;
+            window.__wdtt_autoJoinTry = null;
+        })();
+    """
 
     const val PAGE_404_CHECK =
         "(function(){var t=document.body?document.body.innerText:'';return t.indexOf('Такой страницы нет')!==-1||t.indexOf('Страница не найдена')!==-1?'404':'';})();"
@@ -263,7 +286,8 @@ private object VkAuthJoinScripts {
 object VkAuthWebViewManager {
     private const val TAG = "VkAuthWV"
     private const val AUTH_TIMEOUT_MS = 5 * 60_000L
-    private const val SILENT_AUTH_TIMEOUT_MS = 28_000L
+    /** Тихий вход: ждём TURN; при неудаче открываем видимый WebView. */
+    private const val SILENT_AUTH_TIMEOUT_MS = 22_000L
     private const val NOTIFICATION_ID = 9002
     private const val CHANNEL_ID = "vk_auth_channel"
 
@@ -424,10 +448,15 @@ object VkAuthWebViewManager {
 
         fun destroyWebView() {
             autoJoinJob?.cancel()
+            autoJoinJob = null
             val wv = webViewRef
             webViewRef = null
             if (wv == null) return
             val destroy = Runnable {
+                try {
+                    (wv.parent as? ViewGroup)?.removeView(wv)
+                } catch (_: Exception) {
+                }
                 try {
                     wv.stopLoading()
                     wv.loadUrl("about:blank")
@@ -480,25 +509,35 @@ object VkAuthWebViewManager {
             autoJoinJob?.cancel()
             val clicked = AtomicBoolean(false)
             logAuth("Автоклик: старт (hash=${hash.take(8)}…)", verbose = true)
-            wv.evaluateJavascript(VkAuthJoinScripts.AUTO_JOIN_SETUP, null)
-            val delaysMs = longArrayOf(0, 500, 1000, 2000, 3000, 4000, 5000, 6500, 8000, 10000, 12000, 15000, 18000)
+            // Как в видимом WebView — SPA VK часто дорисовывает кнопку с задержкой со 2-го раза.
+            val delaysMs = longArrayOf(0, 500, 1000, 2000, 3000, 4500, 6000, 8000, 10000, 13000, 16000, 19000)
             autoJoinJob = autoJoinScope.launch {
+                // Дождаться установки хелперов, иначе первый TRY на тёплом Chromium пустой.
+                suspendCancellableCoroutine { cont ->
+                    wv.evaluateJavascript(VkAuthJoinScripts.AUTO_JOIN_SETUP) {
+                        if (cont.isActive) cont.resume(Unit)
+                    }
+                }
                 var prev = 0L
                 for (target in delaysMs) {
                     delay(target - prev)
                     prev = target
                     if (runId != autoJoinRunId) return@launch
-                    wv.evaluateJavascript(VkAuthJoinScripts.AUTO_JOIN_TRY) { result ->
-                        val clean = result?.trim()?.removeSurrounding("\"").orEmpty()
-                        if (clean.isNotBlank() && clean != "null") {
-                            clicked.set(true)
-                            logAuth("Автоклик @${target}ms: $clean", verbose = true)
+                    val clean = suspendCancellableCoroutine { cont ->
+                        wv.evaluateJavascript(VkAuthJoinScripts.AUTO_JOIN_TRY) { result ->
+                            val value = result?.trim()?.removeSurrounding("\"").orEmpty()
+                            if (cont.isActive) cont.resume(value)
                         }
+                    }
+                    if (clean.isNotBlank() && clean != "null") {
+                        clicked.set(true)
+                        logAuth("Автоклик @${target}ms: $clean", verbose = true)
                     }
                 }
                 delay(500)
-                if (runId == autoJoinRunId && !clicked.get()) {
-                    logAuth("Автоклик: кнопка не найдена (тихий режим)", isError = true)
+                if (runId == autoJoinRunId && !clicked.get() && !deferred.isCompleted) {
+                    // Не рвём тихий режим сразу — TURN мог прийти без клика / кнопка ещё грузится.
+                    logAuth("Автоклик: кнопка пока не найдена (тихий режим), ждём TURN…", isError = false)
                 }
             }
         }
@@ -592,14 +631,29 @@ object VkAuthWebViewManager {
                         }
                     }
                     webChromeClient = WebChromeClient()
-                    measure(
-                        View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(640, View.MeasureSpec.EXACTLY),
-                    )
-                    layout(0, 0, 360, 640)
+                    // Без attach к иерархии со 2-го раза Chromium часто не дорисовывает SPA-кнопки.
+                    val host = MainActivity.currentActivity
+                        ?.findViewById<ViewGroup>(android.R.id.content)
+                    if (host != null) {
+                        val lp = FrameLayout.LayoutParams(360, 640)
+                        alpha = 0.01f
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                        host.addView(this, lp)
+                    } else {
+                        measure(
+                            View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(640, View.MeasureSpec.EXACTLY),
+                        )
+                        layout(0, 0, 360, 640)
+                    }
+                    settings.cacheMode = WebSettings.LOAD_NO_CACHE
+                    clearCache(true)
                     onResume()
                     val startUrl = currentJoinUrl()
-                    logAuth("Тихий WebView: url=$startUrl", verbose = true)
+                    logAuth(
+                        "Тихий WebView: url=$startUrl, attached=${host != null}",
+                        verbose = true,
+                    )
                     loadUrl(startUrl, authLoadHeaders())
                 }
             } catch (e: Exception) {
@@ -1057,10 +1111,14 @@ class VkAuthActivity : ComponentActivity() {
         autoJoinJob?.cancel()
         val clicked = AtomicBoolean(false)
         VkAuthWebViewManager.logAuth("Автоклик: старт (run=$runId, hash=${joinHash.take(8)}…)", verbose = true)
-        wv.evaluateJavascript(autoJoinSetupJSCode, null)
         val delaysMs = longArrayOf(0, 500, 1000, 2000, 3000, 4000, 5000, 6500, 8000, 10000, 12000, 15000, 18000)
         val diagAtMs = setOf(3000L, 5000L, 8000L, 12000L, 18000L)
         autoJoinJob = autoJoinScope.launch {
+            suspendCancellableCoroutine { cont ->
+                wv.evaluateJavascript(autoJoinSetupJSCode) {
+                    if (cont.isActive) cont.resume(Unit)
+                }
+            }
             var prev = 0L
             for (target in delaysMs) {
                 delay(target - prev)
@@ -1069,15 +1127,18 @@ class VkAuthActivity : ComponentActivity() {
                     VkAuthWebViewManager.logAuth("Автоклик: отменён (новая страница)", verbose = true)
                     return@launch
                 }
-                wv.evaluateJavascript(autoJoinTryJSCode) { result ->
-                    val clean = result?.trim()?.removeSurrounding("\"").orEmpty()
-                    when {
-                        clean.isNotBlank() && clean != "null" -> {
-                            clicked.set(true)
-                            VkAuthWebViewManager.logAuth("Автоклик @${target}ms: $clean", verbose = true)
-                        }
-                        diagAtMs.contains(target) && !clicked.get() -> dumpPageDiagnostics(wv, "${target}ms")
+                val clean = suspendCancellableCoroutine { cont ->
+                    wv.evaluateJavascript(autoJoinTryJSCode) { result ->
+                        val value = result?.trim()?.removeSurrounding("\"").orEmpty()
+                        if (cont.isActive) cont.resume(value)
                     }
+                }
+                when {
+                    clean.isNotBlank() && clean != "null" -> {
+                        clicked.set(true)
+                        VkAuthWebViewManager.logAuth("Автоклик @${target}ms: $clean", verbose = true)
+                    }
+                    diagAtMs.contains(target) && !clicked.get() -> dumpPageDiagnostics(wv, "${target}ms")
                 }
             }
             delay(500)

@@ -64,7 +64,6 @@ fun ExceptionsTab() {
     var showSystemApps by remember { mutableStateOf(false) }
 
     val isWhitelist by settingsStore.isWhitelist.collectAsStateWithLifecycle(initialValue = false)
-    val runetDirect by settingsStore.runetDirect.collectAsStateWithLifecycle(initialValue = false)
 
     // Load Apps
     LaunchedEffect(Unit) {
@@ -230,51 +229,6 @@ fun ExceptionsTab() {
                         }
                     }
                 }
-            }
-        }
-
-        AppSectionCard(
-            modifier = Modifier.padding(bottom = 12.dp),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                    Text(
-                        "Рунет напрямую",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        "Трафик на российские IP не идёт через VPN (по подсетям). " +
-                            "Сайты .ru с зарубежным IP всё равно через туннель. " +
-                            "Рядом с RU могут уйти напрямую и некоторые чужие адреса.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp,
-                        lineHeight = 14.sp,
-                    )
-                }
-                Switch(
-                    checked = runetDirect,
-                    onCheckedChange = { enabled ->
-                        scope.launch {
-                            settingsStore.saveRunetDirect(enabled)
-                            com.wdtt.client.TunnelManager.reloadWireGuard()
-                        }
-                    },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                        checkedTrackColor = MaterialTheme.colorScheme.primary,
-                        uncheckedThumbColor = MaterialTheme.colorScheme.outline,
-                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
-                    ),
-                )
             }
         }
 

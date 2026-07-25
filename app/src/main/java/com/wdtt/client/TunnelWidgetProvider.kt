@@ -9,6 +9,10 @@ import android.content.Intent
 import android.net.VpnService
 import android.widget.RemoteViews
 import android.widget.Toast
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class TunnelWidgetProvider : AppWidgetProvider() {
 
@@ -25,15 +29,22 @@ class TunnelWidgetProvider : AppWidgetProvider() {
             if (TunnelManager.running.value) {
                 TunnelControl.stop(context)
             } else {
-                if (VpnService.prepare(context) != null) {
-                    Toast.makeText(
-                        context.applicationContext,
-                        "Разрешите qWDTT создать VPN-подключение",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                    openVpnPermissionActivity(context)
-                } else {
-                    TunnelControl.startFromSavedSettings(context)
+                TunnelManager.scope.launch {
+                    val mode = SettingsStore(context.applicationContext).connectionMode.first()
+                    val needsVpn = mode != SettingsStore.CONNECTION_MODE_SOCKS &&
+                        VpnService.prepare(context) != null
+                    withContext(Dispatchers.Main) {
+                        if (needsVpn) {
+                            Toast.makeText(
+                                context.applicationContext,
+                                "Разрешите qWDTT создать VPN-подключение",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            openVpnPermissionActivity(context)
+                        } else {
+                            TunnelControl.startFromSavedSettings(context)
+                        }
+                    }
                 }
             }
         }

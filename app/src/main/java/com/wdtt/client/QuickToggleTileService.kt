@@ -10,6 +10,10 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
 import android.widget.Toast
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class QuickToggleTileService : TileService() {
 
@@ -27,18 +31,24 @@ class QuickToggleTileService : TileService() {
                 return
             }
 
-            if (VpnService.prepare(this) != null) {
-                Toast.makeText(
-                    this,
-                    "Разрешите qWDTT создать VPN-подключение",
-                    Toast.LENGTH_LONG,
-                ).show()
-                openVpnPermissionActivity()
-                return
+            TunnelManager.scope.launch {
+                val mode = SettingsStore(applicationContext).connectionMode.first()
+                val needsVpn = mode != SettingsStore.CONNECTION_MODE_SOCKS &&
+                    VpnService.prepare(this@QuickToggleTileService) != null
+                withContext(Dispatchers.Main) {
+                    if (needsVpn) {
+                        Toast.makeText(
+                            this@QuickToggleTileService,
+                            "Разрешите qWDTT создать VPN-подключение",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        openVpnPermissionActivity()
+                    } else {
+                        TunnelControl.startFromSavedSettings(applicationContext)
+                        updateTile(true)
+                    }
+                }
             }
-
-            TunnelControl.startFromSavedSettings(applicationContext)
-            updateTile(true)
         }.onFailure { e ->
             Log.e(TAG, "QS tile onClick failed", e)
         }

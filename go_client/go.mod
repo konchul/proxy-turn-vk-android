@@ -3,6 +3,7 @@ module wg-turn-client
 go 1.26
 
 require (
+	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5
 	github.com/bogdanfinn/fhttp v0.6.8
 	github.com/bogdanfinn/tls-client v1.14.0
 	github.com/cbeuw/connutil v1.0.1
@@ -13,6 +14,7 @@ require (
 	github.com/pion/turn/v5 v5.0.2
 	golang.org/x/crypto v0.46.0
 	golang.org/x/net v0.48.0
+	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 )
 
 require (
@@ -22,6 +24,7 @@ require (
 	github.com/bogdanfinn/quic-go-utls v1.0.9-utls // indirect
 	github.com/bogdanfinn/utls v1.7.7-barnius // indirect
 	github.com/bogdanfinn/websocket v1.5.5-barnius // indirect
+	github.com/google/btree v1.1.2 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/stun/v3 v3.1.1 // indirect
@@ -30,4 +33,7 @@ require (
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/time v0.10.0 // indirect
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
+	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
 )

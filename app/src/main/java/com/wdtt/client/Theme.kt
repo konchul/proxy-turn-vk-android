@@ -201,16 +201,9 @@ private fun getAppColorScheme(palette: String, isDark: Boolean): androidx.compos
 object WDTTColors {
     // Статус: подключено
     val connected = Color(0xFF4CAF50)
-    val connectedContainer = Color(0xFF4CAF50).copy(alpha = 0.12f)
-    val onConnected = Color(0xFF1B5E20)
-
-    val connectedDark = Color(0xFF81C784)
-    val connectedContainerDark = Color(0xFF81C784).copy(alpha = 0.15f)
-    val onConnectedDark = Color(0xFFC8E6C9)
 
     // Статус: предупреждение
     val warning = Color(0xFFFFA726)
-    val warningDark = Color(0xFFFFCC80)
 
     // Терминал (логи)
     val terminalBg = Color(0xFF1A1A2E)
@@ -219,15 +212,7 @@ object WDTTColors {
     val terminalGreen = Color(0xFF4CAF50)
     val terminalBlue = Color(0xFF42A5F5)
     val terminalRed = Color(0xFFEF5350)
-    val terminalYellow = Color(0xFFFFC107)
     val terminalCounter = Color(0xFF1E88E5)
-
-    // GitHub
-    val github = Color(0xFF24292E)
-    val githubDark = Color(0xFF333C47)
-
-    // Donate
-    val donate = Color(0xFF8B3FFD)
 }
 
 @Composable

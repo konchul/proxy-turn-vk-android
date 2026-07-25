@@ -12,10 +12,7 @@ import (
 )
 
 
-const (
-	workersPerGroup  = 9
-	defaultCycleSecs = 36000
-)
+const workersPerGroup = 9
 
 // WorkerGroup:
 // Запускает 9 потоков с одними кредами. Ротации нет — работает до смерти воркеров.

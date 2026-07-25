@@ -1,7 +1,6 @@
 package com.wdtt.client
 
 import android.content.Context
-import android.util.DisplayMetrics
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File

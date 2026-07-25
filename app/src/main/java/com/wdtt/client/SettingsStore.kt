@@ -48,8 +48,6 @@ class SettingsStore(context: Context) {
         private val SERVER_DTLS_PORT = intPreferencesKey("server_dtls_port")
         private val SERVER_WG_PORT = intPreferencesKey("server_wg_port")
         private val SNI = stringPreferencesKey("sni")
-        private val NO_DTLS = booleanPreferencesKey("no_dtls")
-        private val NO_DNS = booleanPreferencesKey("no_dns")
 
         private val DEPLOY_IP = stringPreferencesKey("deploy_ip")
         private val DEPLOY_LOGIN = stringPreferencesKey("deploy_login")
@@ -127,18 +125,26 @@ class SettingsStore(context: Context) {
         private val STOP_ON_WIFI = booleanPreferencesKey("stop_on_wifi")
         private val CONNECTION_PIPELINE_ENABLED = booleanPreferencesKey("connection_pipeline_enabled")
         private val SORT_PROFILES_BY_PING = booleanPreferencesKey("sort_profiles_by_ping")
+        /** vpn = Android VpnService; socks = локальный SOCKS5 без VPN. */
+        private val CONNECTION_MODE = stringPreferencesKey("connection_mode")
+        private val SOCKS_PORT = intPreferencesKey("socks_port")
         /** -1 = выкл, 0 = при каждом открытии, иначе интервал в часах (6/12/24). */
         private val SUB_AUTO_REFRESH_HOURS = intPreferencesKey("sub_auto_refresh_hours")
 
         const val SUB_AUTO_REFRESH_NEVER = -1
         const val SUB_AUTO_REFRESH_EVERY_OPEN = 0
         const val DEFAULT_SUB_AUTO_REFRESH_HOURS = 12
+        const val DEFAULT_SOCKS_PORT = 1080
+        const val CONNECTION_MODE_VPN = "vpn"
+        const val CONNECTION_MODE_SOCKS = "socks"
 
         private val HAS_SEEN_WELCOME_DIALOG = booleanPreferencesKey("has_seen_welcome_dialog")
         private val LAST_SEEN_VERSION_CODE = intPreferencesKey("last_seen_version_code")
 
         /** versionCode, при первом запуске после которого включается VKCalls у всех. */
         const val VKCALLS_FORCE_MIGRATION_VERSION = 23
+        /** versionCode: принудительно выключаем «Рунет напрямую» (мало где стабильно). */
+        const val RUNET_DIRECT_FORCE_OFF_VERSION = 31
 
         private val migrationMutex = Mutex()
         private val migrationReady = CompletableDeferred<Unit>()
@@ -153,6 +159,18 @@ class SettingsStore(context: Context) {
         fun normalizeObfsMode(mode: String?): String {
             return if (mode.equals("video", ignoreCase = true)) "video" else "audio"
         }
+
+        fun normalizeConnectionMode(mode: String?): String {
+            return if (mode.equals(CONNECTION_MODE_SOCKS, ignoreCase = true)) {
+                CONNECTION_MODE_SOCKS
+            } else {
+                CONNECTION_MODE_VPN
+            }
+        }
+
+        fun normalizeSocksPort(port: Int): Int = port.coerceIn(1, 65535)
+
+        fun socksListenAddress(port: Int): String = "127.0.0.1:${normalizeSocksPort(port)}"
 
         fun obfsModeDisplay(mode: String): String {
             return if (normalizeObfsMode(mode) == "video") "Видеозвонок (H.264)" else "Аудиозвонок (OPUS)"
@@ -299,7 +317,6 @@ class SettingsStore(context: Context) {
     val serverDtlsPort: Flow<Int> = dataStore.data.map { it[SERVER_DTLS_PORT] ?: 56000 }
     val serverWgPort: Flow<Int> = dataStore.data.map { it[SERVER_WG_PORT] ?: 56001 }
     val sni: Flow<String> = dataStore.data.map { it[SNI] ?: "" }
-    val noDns: Flow<Boolean> = dataStore.data.map { it[NO_DNS] ?: false }
 
     val deployIp: Flow<String> = dataStore.data.map { it[DEPLOY_IP] ?: "" }
     val deployLogin: Flow<String> = dataStore.data.map { it[DEPLOY_LOGIN] ?: "" }
@@ -394,6 +411,8 @@ class SettingsStore(context: Context) {
     /** Схема этапов подключения на вкладке «Логи». По умолчанию включена. */
     val connectionPipelineEnabled: Flow<Boolean> = dataStore.data.map { it[CONNECTION_PIPELINE_ENABLED] ?: true }
     val sortProfilesByPing: Flow<Boolean> = dataStore.data.map { it[SORT_PROFILES_BY_PING] ?: false }
+    val connectionMode: Flow<String> = dataStore.data.map { normalizeConnectionMode(it[CONNECTION_MODE]) }
+    val socksPort: Flow<Int> = dataStore.data.map { normalizeSocksPort(it[SOCKS_PORT] ?: DEFAULT_SOCKS_PORT) }
     val subscriptionAutoRefreshHours: Flow<Int> = dataStore.data.map {
         it[SUB_AUTO_REFRESH_HOURS] ?: DEFAULT_SUB_AUTO_REFRESH_HOURS
     }
@@ -404,6 +423,14 @@ class SettingsStore(context: Context) {
 
     suspend fun saveStopOnWifi(enabled: Boolean) {
         dataStore.edit { prefs -> prefs[STOP_ON_WIFI] = enabled }
+    }
+
+    suspend fun saveConnectionMode(mode: String) {
+        dataStore.edit { prefs -> prefs[CONNECTION_MODE] = normalizeConnectionMode(mode) }
+    }
+
+    suspend fun saveSocksPort(port: Int) {
+        dataStore.edit { prefs -> prefs[SOCKS_PORT] = normalizeSocksPort(port) }
     }
 
     suspend fun saveConnectionPipelineEnabled(enabled: Boolean) {
@@ -504,16 +531,9 @@ class SettingsStore(context: Context) {
         protocol: String,
         listenPort: Int,
         sni: String = "",
-        noDns: Boolean = false
     ) {
         dataStore.edit { prefs ->
             val cleanVkHashes = vkHashes.split(Regex("[,\\s\\n]+"))
-                .map { stripVkUrlStatic(it) }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .joinToString(",")
-
-            (prefs[VK_HASHES] ?: "").split(Regex("[,\\s\\n]+"))
                 .map { stripVkUrlStatic(it) }
                 .filter { it.isNotBlank() }
                 .distinct()
@@ -526,7 +546,6 @@ class SettingsStore(context: Context) {
             prefs[PROTOCOL] = protocol
             prefs[LISTEN_PORT] = listenPort
             prefs[SNI] = sni
-            prefs[NO_DNS] = noDns
         }
     }
 
@@ -762,6 +781,11 @@ class SettingsStore(context: Context) {
             }
             if (lastSeen < VKCALLS_FORCE_MIGRATION_VERSION && currentCode >= VKCALLS_FORCE_MIGRATION_VERSION) {
                 prefs[VK_ANON_PATH] = "vkcalls"
+            }
+            // 1.3.5: опция нестабильна на многих устройствах — сбрасываем в выкл. при обновлении.
+            // Пользователь может снова включить вручную в «Обход».
+            if (lastSeen < RUNET_DIRECT_FORCE_OFF_VERSION && currentCode >= RUNET_DIRECT_FORCE_OFF_VERSION) {
+                prefs[RUNET_DIRECT] = false
             }
             prefs[LAST_SEEN_VERSION_CODE] = currentCode
         }

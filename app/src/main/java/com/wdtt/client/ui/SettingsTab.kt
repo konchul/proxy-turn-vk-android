@@ -42,6 +42,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Density
@@ -160,6 +161,13 @@ fun SettingsTabContent(
     val autoSwitchToLogs by settingsStore.autoSwitchToLogs.collectAsStateWithLifecycle(initialValue = true)
     val stopOnWifi by settingsStore.stopOnWifi.collectAsStateWithLifecycle(initialValue = false)
     val connectionPipelineEnabled by settingsStore.connectionPipelineEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val connectionMode by settingsStore.connectionMode.collectAsStateWithLifecycle(
+        initialValue = SettingsStore.CONNECTION_MODE_VPN
+    )
+    val socksPort by settingsStore.socksPort.collectAsStateWithLifecycle(
+        initialValue = SettingsStore.DEFAULT_SOCKS_PORT
+    )
+    var socksPortInput by rememberSaveable { mutableStateOf(SettingsStore.DEFAULT_SOCKS_PORT.toString()) }
     val detailedLogs by settingsStore.detailedLogs.collectAsStateWithLifecycle(initialValue = false)
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = com.wdtt.client.DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
@@ -230,6 +238,9 @@ fun SettingsTabContent(
     val goDnsDohCustomStored by settingsStore.goDnsDohCustom.collectAsStateWithLifecycle(initialValue = "")
     val obfsMode by settingsStore.obfsMode.collectAsStateWithLifecycle(initialValue = "audio")
     val interfaceRole by settingsStore.interfaceRole.collectAsStateWithLifecycle(initialValue = "admin")
+    LaunchedEffect(socksPort) {
+        socksPortInput = socksPort.toString()
+    }
     var goDnsCustomInput by rememberSaveable { mutableStateOf("") }
     var goDnsDohCustomInput by rememberSaveable { mutableStateOf("") }
     val useVKCallsAuth = !vkAnonPath.equals("legacy", ignoreCase = true)
@@ -303,7 +314,7 @@ fun SettingsTabContent(
             settingsStore.savePorts(embeddedPort, serverWgPort, port)
             settingsStore.save(
                 PeerAddress.host(peer), hashes, "",
-                workers, "udp", port, sni, false
+                workers, "udp", port, sni
             )
         }
         sniInput = sni
@@ -411,7 +422,7 @@ fun SettingsTabContent(
             val host = PeerAddress.host(peerInput.trim())
             settingsStore.save(
                 host, hashes, "",
-                finalWorkers, "udp", savedLocalPort, sniInput, false
+                finalWorkers, "udp", savedLocalPort, sniInput
             )
             onSaved?.invoke()
         }
@@ -429,7 +440,7 @@ fun SettingsTabContent(
             val host = PeerAddress.host(peerInput.trim())
             settingsStore.save(
                 host, combinedHashes, "",
-                finalWorkers, "udp", savedLocalPort, sniInput, false
+                finalWorkers, "udp", savedLocalPort, sniInput
             )
         }
     }
@@ -456,7 +467,7 @@ fun SettingsTabContent(
             val effectiveVkAnonPath = SettingsStore.resolveVkAnonPath(context)
             settingsStore.save(
                 host, combinedHashes, "",
-                finalWorkers, "udp", effectiveLocalPort, sniInput, false
+                finalWorkers, "udp", effectiveLocalPort, sniInput
             )
             settingsStore.saveCaptchaMode(effectiveCaptchaMode)
             settingsStore.saveCaptchaSolveMethod(effectiveCaptchaSolveMethod)
@@ -477,6 +488,8 @@ fun SettingsTabContent(
                 putExtra("vk_anon_path", effectiveVkAnonPath)
                 putExtra("go_dns_arg", effectiveGoDns)
                 putExtra("obfs_mode", obfsMode)
+                putExtra("connection_mode", connectionMode)
+                putExtra("socks_port", SettingsStore.normalizeSocksPort(socksPortInput.toIntOrNull() ?: socksPort))
             }
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
             else context.startService(intent)
@@ -492,6 +505,10 @@ fun SettingsTabContent(
                 onConnectRequested()
             }
             startTunnelService()
+        }
+        if (connectionMode == SettingsStore.CONNECTION_MODE_SOCKS) {
+            proceed()
+            return
         }
         val activity = context as? com.wdtt.client.MainActivity
         if (activity != null) {
@@ -908,8 +925,6 @@ fun SettingsTabContent(
                         )
                     }
 
-                    // Removed BS check toggle
-
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Row(
@@ -1101,12 +1116,123 @@ fun SettingsTabContent(
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
+                            "Режим подключения",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            "VPN — весь трафик через туннель. SOCKS5 — без VPN-разрешения; укажите прокси вручную в приложении (Telegram и т.п.).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = connectionMode == SettingsStore.CONNECTION_MODE_VPN,
+                                onClick = {
+                                    if (!tunnelRunning) {
+                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_VPN) }
+                                    }
+                                },
+                                label = { Text("VPN") },
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = connectionMode == SettingsStore.CONNECTION_MODE_SOCKS,
+                                onClick = {
+                                    if (!tunnelRunning) {
+                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_SOCKS) }
+                                    }
+                                },
+                                label = { Text("SOCKS5") },
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (connectionMode == SettingsStore.CONNECTION_MODE_SOCKS) {
+                            val socksAddr = SettingsStore.socksListenAddress(
+                                socksPortInput.toIntOrNull() ?: socksPort
+                            )
+                            OutlinedTextField(
+                                value = socksPortInput,
+                                onValueChange = { value ->
+                                    if (value.all { it.isDigit() } && value.length <= 5) {
+                                        socksPortInput = value
+                                        value.toIntOrNull()?.let { port ->
+                                            scope.launch { settingsStore.saveSocksPort(port) }
+                                        }
+                                    }
+                                },
+                                label = { Text("Порт SOCKS5") },
+                                singleLine = true,
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                            )
+                            Surface(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("socks", socksAddr))
+                                    Toast.makeText(context, "Скопировано: $socksAddr", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                                ),
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            "Адрес прокси",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        Text(
+                                            socksAddr,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.ContentCopy,
+                                        contentDescription = "Копировать",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                            }
+                        }
+                        if (tunnelRunning) {
+                            Text(
+                                "Смена режима — после отключения туннеля",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
                             "Маскировка трафика",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            "RTP-пакеты под аудио (OPUS) или видео (H.264) звонок VK. Сервер подстраивается под выбранный режим.",
+                            "RTP-пакеты под аудио (OPUS) или видео (H.264) звонок VK.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

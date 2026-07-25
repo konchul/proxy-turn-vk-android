@@ -16,7 +16,6 @@ object DeployManager {
     val isDeploying = MutableStateFlow(false)
     val deployProgress = MutableStateFlow(0f)
     val currentStep = MutableStateFlow("")
-    val lastResult = MutableStateFlow("") // "success", "error: ...", ""
 
     @Volatile
     var activeSession: com.jcraft.jsch.Session? = null
@@ -57,14 +56,12 @@ object DeployManager {
         deployStartTime = System.currentTimeMillis()
         deployProgress.value = 0f
         currentStep.value = "Инициализация..."
-        lastResult.value = ""
         TunnelManager.addDeployLog("Старт установки…")
     }
 
     fun stopDeploy(result: String = "") {
         isDeploying.value = false
         deployStartTime = 0L
-        if (result.isNotBlank()) lastResult.value = result
         if (result.isNotBlank() && !result.equals("success", ignoreCase = true)) {
             if (result.startsWith("error", ignoreCase = true) ||
                 result.startsWith("Ошибка", ignoreCase = true) ||

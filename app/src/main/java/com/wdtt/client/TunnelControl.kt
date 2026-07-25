@@ -9,15 +9,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-object  TunnelControl {
-
-    fun toggle(context: Context) {
-        if (TunnelManager.running.value) {
-            stop(context)
-        } else {
-            startFromSavedSettings(context)
-        }
-    }
+object TunnelControl {
 
     fun stop(context: Context) {
         val stopIntent = Intent(context, TunnelService::class.java).apply { action = "STOP" }
@@ -39,6 +31,8 @@ object  TunnelControl {
             val vkAnonPath = SettingsStore.normalizeVkAnonPath(store.vkAnonPath.first())
             val goDnsArg = store.resolveGoDnsArg()
             val obfsMode = SettingsStore.normalizeObfsMode(store.obfsMode.first())
+            val connectionMode = SettingsStore.normalizeConnectionMode(store.connectionMode.first())
+            val socksPort = SettingsStore.normalizeSocksPort(store.socksPort.first())
             val manualPortsEnabled = store.manualPortsEnabled.first()
             val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
             val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverDtlsPort)
@@ -61,6 +55,8 @@ object  TunnelControl {
                 putExtra("vk_anon_path", vkAnonPath)
                 putExtra("go_dns_arg", goDnsArg)
                 putExtra("obfs_mode", obfsMode)
+                putExtra("connection_mode", connectionMode)
+                putExtra("socks_port", socksPort)
             }
 
             withContext(Dispatchers.Main) {

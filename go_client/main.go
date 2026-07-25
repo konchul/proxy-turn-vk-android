@@ -177,8 +177,14 @@ func main() {
 	goDNS := flag.String("go-dns", "yandex", "DNS для VK (yandex/cloudflare/google, doh-yandex/doh-cloudflare/doh-google, custom:IP или doh:URL)")
 	obfsMode := flag.String("obfs", "audio", "режим обфускации (audio/video)")
 	checkHashes := flag.Bool("check-hashes", false, "проверить VK-хеши и выйти")
+	connMode := flag.String("mode", "vpn", "режим клиента (vpn|socks)")
+	socksAddr := flag.String("socks", "127.0.0.1:1080", "локальный SOCKS5 (только -mode socks)")
 
 	flag.Parse()
+	activeConnMode := strings.ToLower(strings.TrimSpace(*connMode))
+	if activeConnMode != "socks" {
+		activeConnMode = "vpn"
+	}
 	setupGlobalResolver(*goDNS)
 	activeCaptchaMode := setCaptchaMode(*captchaMode)
 	activeVkAuthMode := setVkAuthMode(*vkAuthMode)
@@ -320,6 +326,10 @@ func main() {
 	log.Printf("[КЛИЕНТ] Хешей: %d", len(hashes))
 	log.Printf("[КЛИЕНТ] Слушаю: %s | Пир: %s", *listen, *peerAddr)
 	log.Printf("[КЛИЕНТ] Протокол: UDP")
+	log.Printf("[КЛИЕНТ] Режим: %s", activeConnMode)
+	if activeConnMode == "socks" {
+		log.Printf("[КЛИЕНТ] SOCKS5: %s", *socksAddr)
+	}
 	log.Printf("[КЛИЕНТ] WRAP: %s", wrapStatus)
 	log.Printf("[WRAP] Ключ выведен из пароля, режим RTP AEAD активен")
 	log.Printf("[КЛИЕНТ] Device ID: %s", *deviceID)
@@ -368,6 +378,18 @@ func main() {
 				log.Printf("[КОНФИГ] Ошибка сохранения: %v", err)
 			} else {
 				log.Println("[КОНФИГ] Сохранён в wg-turn.conf")
+			}
+
+			if activeConnMode == "socks" {
+				dev, tnet, err := startUserspaceWireGuard(finalConf)
+				if err != nil {
+					log.Printf("[SOCKS] Ошибка userspace WG: %v", err)
+					return
+				}
+				defer dev.Close()
+				if err := runSocks5Server(ctx, *socksAddr, tnet); err != nil {
+					log.Printf("[SOCKS] Сервер остановлен: %v", err)
+				}
 			}
 		case <-ctx.Done():
 		}
