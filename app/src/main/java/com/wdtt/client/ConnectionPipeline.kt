@@ -45,9 +45,12 @@ enum class ConnectionStep(val order: Int, val label: String, val detail: String)
     DTLS(5, "DTLS", "Handshake с сервером"),
     WORKERS(6, "Потоки", "Активация воркеров"),
     VPN(7, "VPN", "Запуск WireGuard"),
+    RAW(7, "Raw", "Настройка raw-IP туннеля"),
     SOCKS(7, "SOCKS", "Локальный SOCKS5"),
     DONE(8, "OK", "Туннель работает"),
 }
+
+enum class ConnectionTransportKind { VPN, RAW, SOCKS }
 
 data class ConnectionPipelineState(
     val current: ConnectionStep? = null,
@@ -57,10 +60,20 @@ data class ConnectionPipelineState(
     val captchaRequired: Boolean = false,
     val timedOut: Boolean = false,
     val timeoutSec: Int = 10,
-    val socksMode: Boolean = false,
+    val transportKind: ConnectionTransportKind = ConnectionTransportKind.VPN,
+    /**
+     * DTLS-хендшейк реально выполняется только в классическом VPN-режиме без
+     * -notls — в Raw и в Direct(noDtls) его нет вообще (RTP-obfs AEAD
+     * напрямую), но шаг DTLS раньше всё равно показывался в схеме и просто
+     * мгновенно "проскакивал", что вводило в заблуждение.
+     */
+    val dtlsUsed: Boolean = true,
 ) {
-    fun finalTransportStep(): ConnectionStep =
-        if (socksMode) ConnectionStep.SOCKS else ConnectionStep.VPN
+    fun finalTransportStep(): ConnectionStep = when (transportKind) {
+        ConnectionTransportKind.VPN -> ConnectionStep.VPN
+        ConnectionTransportKind.RAW -> ConnectionStep.RAW
+        ConnectionTransportKind.SOCKS -> ConnectionStep.SOCKS
+    }
 
     fun stepsToShow(): List<ConnectionStep> = buildList {
         add(ConnectionStep.DNS)
@@ -68,24 +81,11 @@ data class ConnectionPipelineState(
         if (captchaRequired) add(ConnectionStep.CAPTCHA)
         add(ConnectionStep.WRAP)
         add(ConnectionStep.TURN)
-        add(ConnectionStep.DTLS)
+        if (dtlsUsed) add(ConnectionStep.DTLS)
         add(ConnectionStep.WORKERS)
         add(finalTransportStep())
     }
 
-    fun currentDetail(): String {
-        failed?.let {
-            return if (timedOut) "Таймаут ${timeoutSec} с: ${it.label}" else "Ошибка: ${it.detail}"
-        }
-        current?.let { return it.detail }
-        if (completed.contains(ConnectionStep.VPN) ||
-            completed.contains(ConnectionStep.SOCKS) ||
-            completed.contains(ConnectionStep.WORKERS)
-        ) {
-            return ConnectionStep.DONE.detail
-        }
-        return "Ожидание…"
-    }
 }
 
 private enum class StepVisual { Done, Current, Pending, Failed }
@@ -117,26 +117,6 @@ fun ConnectionPipelineCard(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "Схема подключения",
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    state.currentDetail(),
-                    color = if (state.failed != null) failedColor else currentColor,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = 1,
-                )
-            }
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,

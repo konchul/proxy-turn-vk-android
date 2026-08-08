@@ -14,6 +14,11 @@ import (
 
 const workersPerGroup = 9
 
+// allocateGateInterval — минимальный интервал между TURN Allocate-запросами
+// внутри одной группы воркеров (см. комментарий у allocateTicker в
+// WorkerGroup). Тот же порядок величины, что у free-turn-proxy (200ms).
+const allocateGateInterval = 200 * time.Millisecond
+
 // WorkerGroup:
 // Запускает 9 потоков с одними кредами. Ротации нет — работает до смерти воркеров.
 func WorkerGroup(
@@ -110,20 +115,32 @@ func WorkerGroup(
 		return true
 	}
 
-	// Сигнализируем следующей группе, что мы успешно запустились (креды получены + 2 сек форы)
+	// Сигнализируем следующей группе, что мы успешно запустились (креды получены + фора)
 	if signalReady != nil {
 		go func() {
-			time.Sleep(2000 * time.Millisecond)
+			delayMs := 1000 + rand.Intn(500)
+			time.Sleep(time.Duration(delayMs) * time.Millisecond)
 			close(signalReady)
 			log.Printf("[ГРУППА #%d] Успешный старт! Передача эстафеты следующей группе...", groupID)
 		}()
 	}
 
+	// Общий rate-limit на TURN Allocate по всей группе: не более одной новой
+	// аллокации за тик, независимо от того, сколько воркеров сейчас готовы
+	// её выполнить (стартовый stagger — отдельная вещь, см. workerDelay ниже —
+	// он размазывает старт горутин, но не сами ретраи Allocate внутри уже
+	// запущенных). Без этого на нестабильной сети несколько воркеров всё
+	// равно накладываются друг на друга и вместе выжигают VK-квоту (error
+	// 486) быстрее, чем должны. См. RunSession(allocateGate) в session.go и
+	// комментарий там про free-turn-proxy — тот же приём.
+	allocateTicker := time.NewTicker(allocateGateInterval)
+	defer allocateTicker.Stop()
+
 	for i, wid := range workerIDs {
 		wg.Add(1)
 
-		// Stagger: 500мс между воркерами
-		workerDelay := time.Duration(i) * 500 * time.Millisecond
+		// Stagger: 200мс между воркерами
+		workerDelay := time.Duration(i) * 200 * time.Millisecond
 
 		go func(wid int, delay time.Duration) {
 			defer wg.Done()
@@ -159,7 +176,7 @@ func WorkerGroup(
 				credsMu.RUnlock()
 
 				configDelivered, sessErr := RunSession(ctx, tp, peer, d, localPort,
-					getConf, cc, wid, &credsSnapshot, deviceID, password, stats)
+					getConf, cc, wid, &credsSnapshot, deviceID, password, stats, allocateTicker.C)
 
 				quotaRetry := false
 				if getConf {
@@ -292,6 +309,18 @@ type TurnParams struct {
 	Hashes  []string
 	WrapKey []byte // Password-derived WRAP key (32 bytes), nil = disabled
 	ObfsMode string // "audio" or "video" — RTP masking mode
+	// NoDTLS: пропустить DTLS и идти RTP-obfs AEAD напрямую поверх TURN relay.
+	// Требует сервер, который умеет принимать прямые (без DTLS) сессии на
+	// отдельном порту/слушателе — см. server.go -listen-direct.
+	NoDTLS bool
+	// RawMode: raw-IP без WireGuard (см. server.go -listen-raw, handleConnRaw).
+	// Подразумевает NoDTLS — сервер на -listen-raw DTLS не понимает.
+	RawMode bool
+	// TCPTransport: соединяться с TURN-relay по TCP вместо UDP (см.
+	// dialTURNConn в session.go). На некоторых сетях (замечено на
+	// Ростелекоме) UDP до TURN душится/дропается провайдером агрессивнее,
+	// чем TCP на тот же relay — этот флаг обходит именно это.
+	TCPTransport bool
 }
 
 // Credentials — учетные данные TURN

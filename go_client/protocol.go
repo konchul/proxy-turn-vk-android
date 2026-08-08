@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -56,4 +57,53 @@ func SendAuth(conn net.Conn, deviceID, password string) error {
 	return nil
 }
 
+// RequestRawConfig запрашивает у сервера конфигурацию для raw-IP режима
+// (без WireGuard) — сервер отвечает "RAWCONF:ip|dns|mtu" (см. server.go
+// handleConnRaw). ip пусто на первый вызов, если сервер ещё не назначил его.
+func RequestRawConfig(conn net.Conn, deviceID, password string) (ip, dnsCSV string, mtu int, err error) {
+	payload := fmt.Sprintf("GETCONF_RAW:%s|%s", deviceID, password)
+	if _, err = conn.Write([]byte(payload)); err != nil {
+		return "", "", 0, fmt.Errorf("отправка GETCONF_RAW: %w", err)
+	}
 
+	b := make([]byte, 4096)
+	if err = conn.SetReadDeadline(time.Now().Add(45 * time.Second)); err != nil {
+		return "", "", 0, fmt.Errorf("установка дедлайна: %w", err)
+	}
+	n, readErr := conn.Read(b)
+	_ = conn.SetReadDeadline(time.Time{})
+	if readErr != nil {
+		return "", "", 0, fmt.Errorf("чтение ответа RAWCONF: %w", readErr)
+	}
+
+	resp := string(b[:n])
+	if resp == "NOCONF" {
+		return "", "", 0, nil
+	}
+	if strings.HasPrefix(resp, "DENIED:") {
+		reason := strings.TrimPrefix(resp, "DENIED:")
+		switch reason {
+		case "wrong_password":
+			return "", "", 0, fmt.Errorf("FATAL_AUTH: неверный пароль подключения")
+		case "expired":
+			return "", "", 0, fmt.Errorf("FATAL_AUTH: срок действия пароля истёк")
+		case "device_mismatch":
+			return "", "", 0, fmt.Errorf("FATAL_AUTH: пароль привязан к другому устройству")
+		default:
+			return "", "", 0, fmt.Errorf("FATAL_AUTH: доступ запрещён (%s)", reason)
+		}
+	}
+	if !strings.HasPrefix(resp, "RAWCONF:") {
+		return "", "", 0, fmt.Errorf("неожиданный ответ RAWCONF: %q", resp)
+	}
+
+	parts := strings.Split(strings.TrimPrefix(resp, "RAWCONF:"), "|")
+	if len(parts) != 3 {
+		return "", "", 0, fmt.Errorf("некорректный формат RAWCONF: %q", resp)
+	}
+	mtuVal, convErr := strconv.Atoi(strings.TrimSpace(parts[2]))
+	if convErr != nil {
+		return "", "", 0, fmt.Errorf("некорректный MTU в RAWCONF: %q", parts[2])
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), mtuVal, nil
+}

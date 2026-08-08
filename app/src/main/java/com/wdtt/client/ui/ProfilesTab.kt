@@ -43,7 +43,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.PlatformTextStyle
-import androidx.compose.material.icons.filled.Menu
 import com.wdtt.client.PeerAddress
 import com.wdtt.client.ConnectionProfile
 import com.wdtt.client.ProfilesStore

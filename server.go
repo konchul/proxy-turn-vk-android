@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"crypto/cipher"
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,10 +15,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	neturl "net/url"
-	"mime/multipart"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -35,6 +35,7 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
+	"golang.org/x/sys/unix"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -52,6 +53,19 @@ const (
 	defaultInternalWGPort = 56001
 	wgMTU                 = 1280
 	keepalive             = 25
+
+	// Raw-IP роутер (без WireGuard) — отдельный TUN/подсеть/NAT, полностью
+	// параллельно WG-пути. Подсеть намеренно не пересекается с wgServerCIDR.
+	rawIfaceName  = "wdttraw0"
+	rawServerAddr = "10.70.66.1"
+	rawServerCIDR = rawServerAddr + "/16"
+	// Raw-режим не несёт WG data header (~32 байта) — только RTP-obfs (12 байт
+	// заголовок + 16 байт AEAD tag + до 60 байт padding в video-режиме) и TURN
+	// ChannelData/Send Indication framing (4-24 байта). Даже в худшем случае
+	// (video-режим, максимальный padding) итоговый размер на проводе — около
+	// 1420 байт с MTU=1300, что укладывается в стандартный Ethernet MTU 1500
+	// без фрагментации.
+	rawMTU = 1300
 )
 
 var dns = "8.8.8.8"
@@ -65,16 +79,19 @@ type ClientDevice struct {
 	PubKey    string `json:"pub_key"`
 	DownBytes int64  `json:"down_bytes"` // скачано устройством
 	UpBytes   int64  `json:"up_bytes"`   // отдано устройством
+	// RawIP — адрес в raw-IP (без WireGuard) роутере. Пусто у старых записей —
+	// назначается лениво при первом подключении в raw-режиме.
+	RawIP string `json:"raw_ip,omitempty"`
 }
 
 type PasswordEntry struct {
 	Label         string   `json:"label,omitempty"` // понятное имя в боте
 	DeviceID      string   `json:"device_id"`       // Для обратной совместимости, если нужно
-	DeviceIDs     []string `json:"device_ids"`  // Список привязанных deviceID
-	MaxDevices    int      `json:"max_devices"` // Максимальное кол-во устройств (0 или 1 = 1 устройство)
-	ExpiresAt     int64    `json:"expires_at"`  // unix timestamp
-	DownBytes     int64    `json:"down_bytes"`  // скачано клиентом
-	UpBytes       int64    `json:"up_bytes"`    // отдано клиентом
+	DeviceIDs     []string `json:"device_ids"`      // Список привязанных deviceID
+	MaxDevices    int      `json:"max_devices"`     // Максимальное кол-во устройств (0 или 1 = 1 устройство)
+	ExpiresAt     int64    `json:"expires_at"`      // unix timestamp
+	DownBytes     int64    `json:"down_bytes"`      // скачано клиентом
+	UpBytes       int64    `json:"up_bytes"`        // отдано клиентом
 	VkHash        string   `json:"vk_hash,omitempty"`
 	Ports         string   `json:"ports,omitempty"` // "dtls,wg,tun"
 	IsDeactivated bool     `json:"is_deactivated,omitempty"`
@@ -140,10 +157,10 @@ type Database struct {
 }
 
 var (
-	db           *Database
-	dbMutex      sync.Mutex
-	dbFile       string
-	globalWgDev  *device.Device
+	db          *Database
+	dbMutex     sync.Mutex
+	dbFile      string
+	globalWgDev *device.Device
 )
 
 var serverWrapKeys = newWrapKeyStore()
@@ -458,6 +475,27 @@ func getNextIP() string {
 		for b4 := 1; b4 <= 254; b4++ {
 			ip := fmt.Sprintf("10.66.%d.%d", b3, b4)
 			if ip == "10.66.66.1" {
+				continue
+			}
+			if !used[ip] {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+func getNextRawIP() string {
+	used := make(map[string]bool)
+	for _, dev := range db.Devices {
+		if dev.RawIP != "" {
+			used[dev.RawIP] = true
+		}
+	}
+	for b3 := 0; b3 <= 255; b3++ {
+		for b4 := 1; b4 <= 254; b4++ {
+			ip := fmt.Sprintf("10.70.%d.%d", b3, b4)
+			if ip == rawServerAddr {
 				continue
 			}
 			if !used[ip] {
@@ -859,7 +897,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 				tempDays = days
 				tempMaxDevs = maxDevs
-				
+
 				var keyboard [][]map[string]interface{}
 				keyboard = append(keyboard, []map[string]interface{}{
 					{"text": "Да", "callback_data": "ports_def"},
@@ -878,7 +916,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				p1 := strings.TrimSpace(parts[0])
 				p2 := strings.TrimSpace(parts[1])
 				p3 := strings.TrimSpace(parts[2])
-				
+
 				if _, err := strconv.Atoi(p1); err != nil {
 					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
 					continue
@@ -891,7 +929,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
 					continue
 				}
-				
+
 				waitingForPorts = false
 				tempPorts = fmt.Sprintf("%s,%s,%s", p1, p2, p3)
 				waitingForHash = true
@@ -1274,6 +1312,30 @@ var bufPool = sync.Pool{
 func getBuf() *[]byte  { return bufPool.Get().(*[]byte) }
 func putBuf(b *[]byte) { bufPool.Put(b) }
 
+// buf2048Pool — буферы под пакеты, читаемые из raw TUN в downlinkLoop.
+// В отличие от bufPool (используется синхронно в пределах одного вызова),
+// эти буферы переживают передачу через канал downlinkWorker.sendCh в другую
+// горутину, поэтому это []byte, а не *[]byte — Get/Put работают с копией
+// слайса, а не с общим указателем, что здесь безопаснее при передаче между
+// горутинами (нет риска, что отправитель продолжит писать в уже
+// отправленный в канал буфер).
+var buf2048Pool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 2048)
+	},
+}
+
+func getBuf2048() []byte {
+	return buf2048Pool.Get().([]byte)[:2048]
+}
+
+func putBuf2048(b []byte) {
+	if cap(b) != 2048 {
+		return
+	}
+	buf2048Pool.Put(b) //nolint:staticcheck // намеренно без указателя, см. комментарий выше
+}
+
 // ==================== Оптимизация ====================
 
 func enableBBR() {
@@ -1308,6 +1370,91 @@ var (
 	serverStartTime      time.Time
 	lastWGStats          = make(map[string]struct{ rx, tx int64 })
 )
+
+// rawDeviceTraffic — per-device счётчики трафика raw-режима, копятся в
+// памяти atomic'ами на горячем пути (каждый uplink/downlink пакет) и
+// периодически сбрасываются в db.Devices/db.Passwords в statsLoop под
+// dbMutex — так же, как updateTrafficFromWG делает для WireGuard. Прямая
+// запись в БД на каждый пакет была бы недопустимо дорогой (db-мьютекс на
+// тысячи pps от 380+ клиентов), а глобальные totalBytesFromClient/
+// totalBytesToClient раньше не разбивались по устройствам вообще — Raw-
+// трафик не попадал ни в бота, ни в /api/profile/status.
+type rawTrafficCounter struct {
+	up   int64
+	down int64
+}
+
+var (
+	rawDeviceTrafficMu sync.Mutex
+	rawDeviceTraffic    = make(map[string]*rawTrafficCounter)
+)
+
+func addRawUplinkBytes(deviceID string, n int64) {
+	if deviceID == "" || deviceID == "unknown" {
+		return
+	}
+	rawDeviceTrafficMu.Lock()
+	c := rawDeviceTraffic[deviceID]
+	if c == nil {
+		c = &rawTrafficCounter{}
+		rawDeviceTraffic[deviceID] = c
+	}
+	c.up += n
+	rawDeviceTrafficMu.Unlock()
+}
+
+func addRawDownlinkBytes(deviceID string, n int64) {
+	if deviceID == "" || deviceID == "unknown" {
+		return
+	}
+	rawDeviceTrafficMu.Lock()
+	c := rawDeviceTraffic[deviceID]
+	if c == nil {
+		c = &rawTrafficCounter{}
+		rawDeviceTraffic[deviceID] = c
+	}
+	c.down += n
+	rawDeviceTrafficMu.Unlock()
+}
+
+// flushRawDeviceTraffic переносит накопленные с прошлого вызова байты в
+// db.Devices/db.Passwords (вызывающий должен держать dbMutex — см. вызов в
+// statsLoop, тот же паттерн, что updateTrafficFromWG под тем же локом).
+func flushRawDeviceTrafficLocked() {
+	rawDeviceTrafficMu.Lock()
+	if len(rawDeviceTraffic) == 0 {
+		rawDeviceTrafficMu.Unlock()
+		return
+	}
+	snapshot := rawDeviceTraffic
+	rawDeviceTraffic = make(map[string]*rawTrafficCounter)
+	rawDeviceTrafficMu.Unlock()
+
+	for deviceID, c := range snapshot {
+		if c.up == 0 && c.down == 0 {
+			continue
+		}
+		if dev, ok := db.Devices[deviceID]; ok {
+			dev.UpBytes += c.up
+			dev.DownBytes += c.down
+		}
+		for _, entry := range db.Passwords {
+			matched := entry.DeviceID == deviceID
+			if !matched {
+				for _, id := range entry.DeviceIDs {
+					if id == deviceID {
+						matched = true
+						break
+					}
+				}
+			}
+			if matched {
+				entry.UpBytes += c.up
+				entry.DownBytes += c.down
+			}
+		}
+	}
+}
 
 func updateTrafficFromWG() {
 	if globalWgDev == nil {
@@ -1358,15 +1505,16 @@ func updateTrafficFromWG() {
 
 		foundEntry := false
 		for _, entry := range db.Passwords {
-			for _, id := range entry.DeviceIDs {
-				if id == targetDevID {
-					entry.UpBytes += deltaRx
-					entry.DownBytes += deltaTx
-					foundEntry = true
-					break
+			matched := entry.DeviceID == targetDevID
+			if !matched {
+				for _, id := range entry.DeviceIDs {
+					if id == targetDevID {
+						matched = true
+						break
+					}
 				}
 			}
-			if entry.DeviceID == targetDevID {
+			if matched {
 				entry.UpBytes += deltaRx
 				entry.DownBytes += deltaTx
 				foundEntry = true
@@ -1422,6 +1570,7 @@ func statsLoop(ctx context.Context, configDir string) {
 
 			// Пишем server.log и периодически сохраняем БД на диск
 			dbMutex.Lock()
+			flushRawDeviceTrafficLocked()
 			numPasswords := len(db.Passwords)
 			numDevices := len(db.Devices)
 			saveTicks++
@@ -1608,6 +1757,67 @@ func setupNftNAT(extIface string) {
 	exec.Command("nft", "add", "rule", "ip", "wdtt", "postrouting", "ip", "saddr", wgServerCIDR, "oifname", extIface, "masquerade").Run()
 }
 
+// setupRawNAT — NAT для raw-IP (без WireGuard) TUN-интерфейса. Полностью
+// отдельные таблицы/цепочки/CIDR от WG-пути (setupFullConeNAT/setupNftNAT
+// выше не трогаются), setupForwardRules переиспользуется как есть — она уже
+// параметризована только именем интерфейса.
+func setupRawNAT(rawIface string) error {
+	extIface := getDefaultInterface()
+	log.Printf("[RAW-NAT] Внешний: %s", extIface)
+
+	switch {
+	case commandExists("iptables"):
+		for i := 0; i < 5; i++ {
+			exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", rawServerCIDR, "-o", extIface, "-m", "comment", "--comment", "WDTT_RAW_MANAGED", "-j", "MASQUERADE").Run()
+		}
+		exec.Command("iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-s", rawServerCIDR, "-o", extIface, "-m", "comment", "--comment", "WDTT_RAW_MANAGED", "-j", "MASQUERADE").Run()
+		setupForwardRules(rawIface)
+		setupRawMSSClamping()
+	case commandExists("nft"):
+		exec.Command("nft", "add", "table", "ip", "wdttraw").Run()
+		exec.Command("nft", "add", "chain", "ip", "wdttraw", "postrouting", "{ type nat hook postrouting priority 100; }").Run()
+		exec.Command("nft", "add", "rule", "ip", "wdttraw", "postrouting", "ip", "saddr", rawServerCIDR, "oifname", extIface, "masquerade").Run()
+		setupForwardRules(rawIface)
+		setupRawMSSClamping()
+	default:
+		return fmt.Errorf("нет iptables/nft для NAT raw-интерфейса")
+	}
+	return nil
+}
+
+// setupRawMSSClamping чинит PMTU-чёрную-дыру для TCP через raw-подсеть:
+// без этого клиенты за строгими firewall (блокирующими ICMP Fragmentation
+// Needed) молча теряют большие TCP-сегменты вместо получения корректной
+// фрагментации/ретрансмита с меньшим MSS. deploy.sh делает то же самое для
+// WG-подсети (fw_add_mss_clamping) — raw-подсеть настраивается здесь, т.к.
+// её NAT/forward поднимается сервером напрямую, а не через deploy.sh.
+func setupRawMSSClamping() {
+	if commandExists("iptables") {
+		for _, dir := range []string{"-s", "-d"} {
+			exec.Command("iptables", "-t", "mangle", "-D", "FORWARD", dir, rawServerCIDR,
+				"-p", "tcp", "-m", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+				"-m", "comment", "--comment", "WDTT_RAW_MANAGED",
+				"-j", "TCPMSS", "--clamp-mss-to-pmtu").Run()
+			exec.Command("iptables", "-t", "mangle", "-I", "FORWARD", dir, rawServerCIDR,
+				"-p", "tcp", "-m", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+				"-m", "comment", "--comment", "WDTT_RAW_MANAGED",
+				"-j", "TCPMSS", "--clamp-mss-to-pmtu").Run()
+		}
+		return
+	}
+	if commandExists("nft") {
+		exec.Command("nft", "add", "table", "inet", "wdttraw_mangle").Run()
+		exec.Command("nft", "add", "chain", "inet", "wdttraw_mangle", "forward",
+			"{ type filter hook forward priority -150; policy accept; }").Run()
+		exec.Command("nft", "add", "rule", "inet", "wdttraw_mangle", "forward",
+			"ip", "saddr", rawServerCIDR, "tcp", "flags", "syn",
+			"tcp", "option", "maxseg", "size", "set", "rt", "mtu").Run()
+		exec.Command("nft", "add", "rule", "inet", "wdttraw_mangle", "forward",
+			"ip", "daddr", rawServerCIDR, "tcp", "flags", "syn",
+			"tcp", "option", "maxseg", "size", "set", "rt", "mtu").Run()
+	}
+}
+
 func setupForwardRules(wgIface string) {
 	if commandExists("iptables") {
 		for i := 0; i < 5; i++ {
@@ -1731,6 +1941,484 @@ PersistentKeepalive = %d`,
 		clientPrivate, clientIP, dns, wgMTU,
 		serverPublic, clientPort, keepalive,
 	)
+}
+
+// ==================== Raw-IP роутер (без WireGuard) ====================
+//
+// Полностью параллельный WG-пути транспорт: клиент шлёт/получает сырые IP-
+// пакеты прямо через RTP-obfs/TURN (см. -listen-raw), без WireGuard-протокола
+// и без loopback-UDP-хопа в userspace WG. Аплинк — просто Write в TUN, ядро
+// само маршрутизирует/NAT'ит дальше; даунлинк — один общий ридер TUN,
+// раздающий пакеты по dst IP в нужную клиентскую сессию.
+
+// downlinkChunkSizeFor — сколько подряд downlink-пакетов такого размера
+// уходят через один и тот же воркер/TURN-relay, прежде чем переключиться на
+// следующий. Как и в клиентском dispatcher.go (chunkSizeFor): без этого
+// пакеты одного TCP-потока летят вперемешку через relay с разным latency →
+// reorder на клиенте → cwnd collapse. Размер зависит от размера пакета по
+// той же логике, что и на клиенте — крупные пакеты группируем покрупнее,
+// мелкие (вероятно ACK встречного аплоада) переключаем/размазываем быстрее.
+// Аплинк размазывается по воркерам естественно (каждый воркер пишет в общий
+// TUN сам по себе), а вот даунлинк — один читатель (downlinkLoop), поэтому
+// распределение по воркерам нужно делать явно.
+const downlinkMaxDwellMS = 15
+
+// downlinkChunkSizeFor зеркалит chunkSizeFor из go_client/dispatcher.go —
+// это отдельный Go-модуль (собственный go.mod), общий код не переиспользуется,
+// но пороги должны совпадать с клиентскими для симметричного поведения.
+func downlinkChunkSizeFor(pktSize int) int {
+	switch {
+	case pktSize > 1100:
+		return 64
+	case pktSize >= 701:
+		return 24
+	case pktSize >= 301:
+		return 8
+	case pktSize >= 101:
+		return 3
+	default:
+		return 1
+	}
+}
+
+// downlinkWorkerBuf — глубина канала пакетов, ожидающих отправки через один
+// relay-воркер. Тот же порядок величины, что клиентский returnChBuf (BDP при
+// ~70-80 Мбит/с и RTT 50-60мс), с запасом на то, что здесь общий downlinkLoop
+// раздаёт пакеты быстрее, чем один relay успевает их вытолкнуть в сеть.
+const downlinkWorkerBuf = 256
+
+// downlinkWorker — per-conn writer: раньше downlinkLoop писал в conn.Write
+// синхронно сам, из единственного потока на весь сервер — если один relay
+// подтормаживал, вставал весь downlink всех клиентов сразу. Теперь
+// downlinkLoop только раскладывает пакеты по каналам (быстро, неблокирующе),
+// а фактическую запись в каждый conn делает своя горутина — так запись в N
+// relay идёт параллельно, и медленный конкретный relay не блокирует остальные.
+type downlinkWorker struct {
+	conn     net.Conn
+	deviceID string
+	sendCh   chan []byte
+	done     chan struct{}
+}
+
+func newDownlinkWorker(conn net.Conn, deviceID string) *downlinkWorker {
+	w := &downlinkWorker{
+		conn:     conn,
+		deviceID: deviceID,
+		sendCh:   make(chan []byte, downlinkWorkerBuf),
+		done:     make(chan struct{}),
+	}
+	go w.run()
+	return w
+}
+
+func (w *downlinkWorker) run() {
+	defer close(w.done)
+	for pkt := range w.sendCh {
+		if _, err := w.conn.Write(pkt); err == nil {
+			atomic.AddInt64(&totalBytesToClient, int64(len(pkt)))
+			addRawDownlinkBytes(w.deviceID, int64(len(pkt)))
+		}
+		putBuf2048(pkt)
+	}
+}
+
+// enqueue кладёт пакет в очередь на отправку. Неблокирующе: если воркер
+// отстаёт и канал переполнен, пакет дропается — как и раньше при синхронной
+// записи, отставший relay не должен задерживать остальных или копить
+// неограниченную очередь просроченных данных.
+func (w *downlinkWorker) enqueue(pkt []byte) bool {
+	select {
+	case w.sendCh <- pkt:
+		return true
+	default:
+		putBuf2048(pkt)
+		return false
+	}
+}
+
+func (w *downlinkWorker) stop() {
+	close(w.sendCh)
+	<-w.done
+}
+
+type rawClientSessions struct {
+	workers      []*downlinkWorker
+	rrIndex      int
+	rrCount      int
+	chunkStartTs int64 // unix millis начала текущего chunk'а — для downlinkMaxDwellMS
+}
+
+type rawRouter struct {
+	file            *os.File
+	mu              sync.RWMutex
+	sessions        map[string]*rawClientSessions // keyed by assigned raw IP клиента
+	uplinkErrLogged uint32                        // чтобы не заспамить лог при устойчивой ошибке записи
+	firstUplink     uint32
+	firstDownlink   uint32
+	noSessionLogged uint32
+}
+
+// createRawTUNFile создаёт TUN-интерфейс напрямую через ioctl(TUNSETIFF), в
+// обход golang.zx2c4.com/wireguard/tun.CreateTUN. Так надо специально: эта
+// библиотека всегда запрашивает IFF_VNET_HDR (для GRO/GSO у настоящего
+// WireGuard-устройства), и на современных ядрах он включается — тогда
+// Read/Write ожидают virtio_net_hdr перед каждым пакетом. Нам нужны просто
+// сырые IP-пакеты без какого-либо заголовка, поэтому TUN создаём сами с
+// IFF_TUN|IFF_NO_PI и без IFF_VNET_HDR.
+func createRawTUNFile(name string) (*os.File, error) {
+	nfd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open /dev/net/tun: %w", err)
+	}
+
+	ifr, err := unix.NewIfreq(name)
+	if err != nil {
+		unix.Close(nfd)
+		return nil, fmt.Errorf("NewIfreq: %w", err)
+	}
+	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
+	if err := unix.IoctlIfreq(nfd, unix.TUNSETIFF, ifr); err != nil {
+		unix.Close(nfd)
+		return nil, fmt.Errorf("TUNSETIFF: %w", err)
+	}
+
+	if err := unix.SetNonblock(nfd, false); err != nil {
+		unix.Close(nfd)
+		return nil, fmt.Errorf("SetNonblock: %w", err)
+	}
+
+	return os.NewFile(uintptr(nfd), "/dev/net/tun"), nil
+}
+
+func newRawRouter() (*rawRouter, error) {
+	runCmdSilent("ip", "link", "del", rawIfaceName)
+	time.Sleep(100 * time.Millisecond)
+
+	tunFile, err := createRawTUNFile(rawIfaceName)
+	if err != nil {
+		return nil, fmt.Errorf("raw TUN: %w", err)
+	}
+
+	for _, cmd := range [][]string{
+		{"ip", "addr", "add", rawServerCIDR, "dev", rawIfaceName},
+		{"ip", "link", "set", "mtu", fmt.Sprintf("%d", rawMTU), "dev", rawIfaceName},
+		{"ip", "link", "set", rawIfaceName, "up"},
+	} {
+		out, err := runCmd(cmd[0], cmd[1:]...)
+		if err != nil && !strings.Contains(out, "File exists") {
+			tunFile.Close()
+			return nil, fmt.Errorf("%s: %s", strings.Join(cmd, " "), out)
+		}
+	}
+
+	if err := setupRawNAT(rawIfaceName); err != nil {
+		tunFile.Close()
+		return nil, err
+	}
+
+	r := &rawRouter{file: tunFile, sessions: make(map[string]*rawClientSessions)}
+	go r.downlinkLoop()
+	log.Printf("[RAW] TUN %s поднят (%s), MTU %d", rawIfaceName, rawServerCIDR, rawMTU)
+	return r, nil
+}
+
+func (r *rawRouter) downlinkLoop() {
+	buf := make([]byte, 2048)
+	for {
+		n, err := r.file.Read(buf)
+		if err != nil {
+			log.Printf("[RAW] downlink остановлен: %v", err)
+			return
+		}
+		pkt := buf[:n]
+		if len(pkt) < 20 || pkt[0]>>4 != 4 {
+			continue // короткий пакет или не IPv4 — raw-режим IPv6 не поддерживает, как и WG-путь
+		}
+		dst := net.IP(pkt[16:20]).String()
+		w := r.pickDownlinkConn(dst, len(pkt))
+		if w == nil {
+			if atomic.CompareAndSwapUint32(&r.noSessionLogged, 0, 1) {
+				log.Printf("[RAW] downlink: нет сессии для %s (пакет от интернета, но клиент не зарегистрирован)", dst)
+			}
+			continue
+		}
+		if atomic.CompareAndSwapUint32(&r.firstDownlink, 0, 1) {
+			log.Printf("[RAW] Первый downlink-пакет доставлен клиенту %s (%d байт)", dst, len(pkt))
+		}
+		// Копируем в pooled-буфер: pkt живёт в общем buf, который readLoop
+		// тут же перезапишет следующим Read — writer-горутина воркера должна
+		// получить свою независимую копию, раз запись теперь асинхронная.
+		out := getBuf2048()[:len(pkt)]
+		copy(out, pkt)
+		w.enqueue(out)
+	}
+}
+
+// pickDownlinkConn выбирает воркера для очередного downlink-пакета клиента
+// dst, размазывая нагрузку по всем его зарегистрированным воркерам
+// адаптивными чанками (см. downlinkChunkSizeFor) с предохранителем
+// downlinkMaxDwellMS на случай, если текущий relay начал тормозить.
+func (r *rawRouter) pickDownlinkConn(dst string, pktSize int) *downlinkWorker {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cs := r.sessions[dst]
+	if cs == nil || len(cs.workers) == 0 {
+		return nil
+	}
+	if cs.rrIndex >= len(cs.workers) {
+		cs.rrIndex = 0
+	}
+
+	now := time.Now().UnixMilli()
+	if cs.chunkStartTs == 0 {
+		cs.chunkStartTs = now
+	} else if now-cs.chunkStartTs >= downlinkMaxDwellMS {
+		cs.rrIndex = (cs.rrIndex + 1) % len(cs.workers)
+		cs.rrCount = 0
+		cs.chunkStartTs = now
+	}
+
+	w := cs.workers[cs.rrIndex]
+	cs.rrCount++
+	if cs.rrCount >= downlinkChunkSizeFor(pktSize) {
+		cs.rrIndex = (cs.rrIndex + 1) % len(cs.workers)
+		cs.rrCount = 0
+		cs.chunkStartTs = now
+	}
+	return w
+}
+
+func (r *rawRouter) register(ip string, conn net.Conn, deviceID string) *downlinkWorker {
+	w := newDownlinkWorker(conn, deviceID)
+	r.mu.Lock()
+	cs := r.sessions[ip]
+	if cs == nil {
+		cs = &rawClientSessions{}
+		r.sessions[ip] = cs
+	}
+	cs.workers = append(cs.workers, w)
+	r.mu.Unlock()
+	return w
+}
+
+func (r *rawRouter) unregister(ip string, w *downlinkWorker) {
+	r.mu.Lock()
+	if cs := r.sessions[ip]; cs != nil {
+		for i, existing := range cs.workers {
+			if existing == w {
+				cs.workers = append(cs.workers[:i], cs.workers[i+1:]...)
+				break
+			}
+		}
+		if cs.rrIndex >= len(cs.workers) {
+			cs.rrIndex = 0
+		}
+		cs.rrCount = 0
+		if len(cs.workers) == 0 {
+			delete(r.sessions, ip)
+		}
+	}
+	r.mu.Unlock()
+	// stop() вне r.mu — ждёт завершения writer-горутины (после close(sendCh)
+	// она дожигает уже поставленные в очередь пакеты), не держим лок роутера
+	// на время этого ожидания.
+	w.stop()
+}
+
+func (r *rawRouter) writeUplink(pkt []byte) error {
+	_, err := r.file.Write(pkt)
+	return err
+}
+
+// handleConnRaw обслуживает клиента в raw-IP режиме: сначала GETCONF_RAW
+// (пароль + deviceID), выдаём IP/DNS/MTU, дальше просто перекачиваем сырые
+// IP-пакеты между activeConn и общим TUN-роутером. Никакого WireGuard.
+func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) {
+	atomic.AddInt64(&totalConns, 1)
+	atomic.AddInt32(&activeConns, 1)
+	defer atomic.AddInt32(&activeConns, -1)
+
+	buf := make([]byte, 1600)
+	if err := clientConn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return
+	}
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		return
+	}
+	clientConn.SetReadDeadline(time.Time{})
+
+	first := string(buf[:n])
+	// Как и в классическом handleConn: только ОДИН воркер в группе шлёт
+	// GETCONF_RAW (просит IP/DNS/MTU), остальные шлют просто AUTH — их тоже
+	// нужно принимать и регистрировать в роутере, иначе из 9 воркеров группы
+	// остаётся рабочим максимум один.
+	isGetConf := strings.HasPrefix(first, "GETCONF_RAW:")
+	isAuth := strings.HasPrefix(first, "AUTH:")
+	if !isGetConf && !isAuth {
+		return
+	}
+	var parts []string
+	if isGetConf {
+		parts = strings.Split(strings.TrimSpace(strings.TrimPrefix(first, "GETCONF_RAW:")), "|")
+	} else {
+		parts = strings.Split(strings.TrimSpace(strings.TrimPrefix(first, "AUTH:")), "|")
+	}
+	deviceID := "unknown"
+	password := ""
+	if len(parts) > 0 {
+		deviceID = parts[0]
+	}
+	if len(parts) > 1 {
+		password = parts[1]
+	}
+
+	var assignedIP string
+
+	if isGetConf {
+		// Только этот воркер проверяет пароль и (при необходимости) создаёт
+		// устройство — как и в классическом GETCONF-пути handleConn.
+		dbMutex.Lock()
+		isMainPass := password != "" && password == db.MainPassword
+		entry, isGenPass := db.Passwords[password]
+		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
+
+		if valid && isGenPass && entry.IsDeactivated {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:deactivated"))
+			return
+		}
+		if valid && isGenPass && !entry.canConnectAndBind(deviceID) {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:device_mismatch"))
+			return
+		}
+		if !valid {
+			dbMutex.Unlock()
+			if isGenPass && isPasswordExpired(entry) {
+				clientConn.Write([]byte("DENIED:expired"))
+			} else {
+				clientConn.Write([]byte("DENIED:wrong_password"))
+			}
+			return
+		}
+		if isGenPass {
+			saveDB()
+		}
+
+		dev, exists := db.Devices[deviceID]
+		if !exists {
+			dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP(), RawIP: getNextRawIP()}
+			db.Devices[deviceID] = dev
+			saveDB()
+		} else if dev.RawIP == "" {
+			dev.RawIP = getNextRawIP()
+			saveDB()
+		}
+		assignedIP = dev.RawIP
+		dbMutex.Unlock()
+
+		if assignedIP == "" {
+			clientConn.Write([]byte("NOCONF"))
+			return
+		}
+		if _, err := clientConn.Write([]byte(fmt.Sprintf("RAWCONF:%s|%s|%d", assignedIP, dns, rawMTU))); err != nil {
+			return
+		}
+	} else {
+		// AUTH-путь (остальные воркеры группы): как и в классическом handleConn,
+		// пароль здесь не проверяется — авторизацию уже подтвердил obfs WRAP-ключ
+		// (без верного пароля пакет не прошёл бы аутентификацию на уровне obfs),
+		// нужен только IP устройства, чтобы зарегистрировать сессию в роутере.
+		dbMutex.Lock()
+		dev, exists := db.Devices[deviceID]
+		if exists && dev.RawIP == "" {
+			dev.RawIP = getNextRawIP()
+			saveDB()
+		}
+		if exists {
+			assignedIP = dev.RawIP
+		}
+		dbMutex.Unlock()
+
+		if assignedIP == "" {
+			// Устройство ещё не создано GETCONF_RAW-воркером — подождём следующей попытки.
+			return
+		}
+	}
+
+	dlWorker := router.register(assignedIP, clientConn, deviceID)
+	defer router.unregister(assignedIP, dlWorker)
+	log.Printf("[RAW] Сессия %s зарегистрирована (ip=%s, getConf=%v)", deviceID, assignedIP, isGetConf)
+	defer log.Printf("[RAW] Сессия %s (ip=%s) завершена", deviceID, assignedIP)
+
+	activeDevicesMu.Lock()
+	activeDevices[deviceID]++
+	activeDevicesMu.Unlock()
+	defer func() {
+		activeDevicesMu.Lock()
+		activeDevices[deviceID]--
+		if activeDevices[deviceID] <= 0 {
+			delete(activeDevices, deviceID)
+		}
+		activeDevicesMu.Unlock()
+	}()
+
+	b := getBuf()
+	defer putBuf(b)
+	// В отличие от классического WG-пути (30 минут простоя — не страшно, это
+	// просто неиспользуемая горутина), мёртвая raw-сессия продолжает висеть в
+	// r.sessions[ip].workers и отравляет round-robin в pickDownlinkConn для
+	// НОВЫХ переподключений того же устройства. Читаем с коротким таймаутом
+	// и реально закрываем сессию, если дольше idleTimeout не было ни данных,
+	// ни keepalive (клиент шлёт keepalive каждые 15с — см. keepaliveInterval
+	// в session.go), вместо того чтобы просто бесконечно перевзводить дедлайн.
+	const idleTimeout = 90 * time.Second
+	lastActivity := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		clientConn.SetReadDeadline(time.Now().Add(20 * time.Second))
+		nn, err := clientConn.Read(*b)
+		if err != nil {
+			if isNetTimeout(err) {
+				if ctx.Err() != nil {
+					return
+				}
+				if time.Since(lastActivity) > idleTimeout {
+					return
+				}
+				continue
+			}
+			return
+		}
+		lastActivity = time.Now()
+		// Keepalive: первый байт 0xFF, размер переменный (25-44 байта,
+		// имитация OPUS-тишины — см. keepaliveMinSize/MaxSize в go_client/
+		// session.go). Раньше был жёстко 1 байт; первый байт настоящего
+		// IPv4-пакета всегда 0x45 (версия 4, IHL 5) и никогда не 0xFF, так
+		// что разбор по первому байту безопасен для любой длины.
+		if nn > 0 && (*b)[0] == 0xFF {
+			continue // keepalive
+		}
+		if strings.HasPrefix(string((*b)[:nn]), "DISCONNECT_RAW:") {
+			// Клиент явно сообщил об отключении — сразу освобождаем слот,
+			// не дожидаясь idleTimeout (см. комментарий выше и session.go).
+			return
+		}
+		atomic.AddInt64(&totalBytesFromClient, int64(nn))
+		addRawUplinkBytes(deviceID, int64(nn))
+		if wErr := router.writeUplink((*b)[:nn]); wErr != nil {
+			if atomic.CompareAndSwapUint32(&router.uplinkErrLogged, 0, 1) {
+				log.Printf("[RAW] Ошибка записи в TUN (ip=%s): %v", assignedIP, wErr)
+			}
+		} else if atomic.CompareAndSwapUint32(&router.firstUplink, 0, 1) {
+			log.Printf("[RAW] Первый uplink-пакет от %s записан в TUN (%d байт)", assignedIP, nn)
+		}
+	}
 }
 
 // ==================== HTTP Control API ====================
@@ -1884,6 +2572,8 @@ func handleAPIProfileUnbind(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "DTLS адрес")
+	listenDirect := flag.String("listen-direct", "", "адрес для клиентов без DTLS (RTP-obfs AEAD напрямую); пусто = выключено")
+	listenRaw := flag.String("listen-raw", "", "адрес для raw-IP клиентов без WireGuard (свой TUN/NAT); пусто = выключено")
 	wgPort := flag.Int("wg-port", defaultInternalWGPort, "WireGuard UDP порт")
 	configDir := flag.String("config-dir", "/etc/wdtt", "директория конфигурации")
 	mainPass := flag.String("password", "", "пароль владельца")
@@ -1919,6 +2609,10 @@ func main() {
 				}
 			} else {
 				cancel()
+				dbMutex.Lock()
+				flushRawDeviceTrafficLocked()
+				saveDB()
+				dbMutex.Unlock()
 				time.Sleep(2 * time.Second)
 				os.Exit(0)
 			}
@@ -1957,6 +2651,7 @@ func main() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/api/profile/status", handleAPIProfileStatus)
 		mux.HandleFunc("/api/profile/unbind", handleAPIProfileUnbind)
+		registerAdminAPIRoutes(mux)
 
 		log.Printf("[API] Запуск HTTP API на %s (TCP)...", *listen)
 		if err := http.ListenAndServe(*listen, mux); err != nil {
@@ -1985,9 +2680,91 @@ func main() {
 
 	log.Printf("   DTLS: %s | WG: %s | NAT: %s", *listen, wgEndpoint, natType)
 	log.Printf("   WRAP: password HKDF + RTP AEAD | keys: %d", serverWrapKeys.Count())
-	log.Println("[SERVER] Готов")
 
 	var wg sync.WaitGroup
+
+	// Прямой (без DTLS) листенер — тот же RTP-obfs AEAD, но без второго
+	// слоя шифрования и без DTLS-хендшейка. Отдельный порт ради обратной
+	// совместимости: старые клиенты продолжают ходить через -listen/DTLS,
+	// новые — сюда через -notls в go_client. Включается явно оператором.
+	if *listenDirect != "" {
+		directAddr, err := net.ResolveUDPAddr("udp", *listenDirect)
+		if err != nil {
+			log.Fatalf("[DIRECT] адрес: %v", err)
+		}
+		directWrapListener, err := listenWrapped(directAddr, serverWrapKeys)
+		if err != nil {
+			log.Fatalf("[DIRECT] %v", err)
+		}
+		context.AfterFunc(ctx, func() { directWrapListener.Close() })
+		log.Printf("   DIRECT (no-DTLS): %s", *listenDirect)
+
+		go func() {
+			for {
+				pc, remoteAddr, acceptErr := directWrapListener.Accept()
+				if acceptErr != nil {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					continue
+				}
+				wg.Add(1)
+				go func(pc net.PacketConn, addr net.Addr) {
+					defer wg.Done()
+					c := &directConn{pc: pc, addr: addr}
+					defer c.Close()
+					handleConn(ctx, c, wgEndpoint, wgDev, keys)
+				}(pc, remoteAddr)
+			}
+		}()
+	}
+
+	// Raw-IP (без WireGuard) листенер — свой TUN/NAT/подсеть. Полностью
+	// опционально: если флаг не передан, ничего не создаётся и не трогает
+	// существующие WG-пути (56000/-listen-direct).
+	if *listenRaw != "" {
+		router, err := newRawRouter()
+		if err != nil {
+			log.Fatalf("[RAW] %v", err)
+		}
+
+		rawAddr, err := net.ResolveUDPAddr("udp", *listenRaw)
+		if err != nil {
+			log.Fatalf("[RAW] адрес: %v", err)
+		}
+		rawWrapListener, err := listenWrapped(rawAddr, serverWrapKeys)
+		if err != nil {
+			log.Fatalf("[RAW] %v", err)
+		}
+		context.AfterFunc(ctx, func() { rawWrapListener.Close() })
+		log.Printf("   RAW (без WireGuard, без DTLS): %s", *listenRaw)
+
+		go func() {
+			for {
+				pc, remoteAddr, acceptErr := rawWrapListener.Accept()
+				if acceptErr != nil {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					continue
+				}
+				wg.Add(1)
+				go func(pc net.PacketConn, addr net.Addr) {
+					defer wg.Done()
+					c := &directConn{pc: pc, addr: addr}
+					defer c.Close()
+					handleConnRaw(ctx, c, router)
+				}(pc, remoteAddr)
+			}
+		}()
+	}
+
+	log.Println("[SERVER] Готов")
+
 	for {
 		dtlsConn, err := listener.Accept()
 		if err != nil {
@@ -2010,23 +2787,56 @@ func main() {
 
 // ==================== Обработка соединений ====================
 
+// directConn — net.Conn поверх уже обфусцированного (RTP-obfs AEAD) UDP-потока
+// от wrapPacketListener, без DTLS. Используется для клиентов go_client -notls.
+type directConn struct {
+	pc   net.PacketConn
+	addr net.Addr
+}
+
+func (c *directConn) Read(b []byte) (int, error) {
+	// wrapPacketConn.ReadFrom возвращает ошибку и на битый/нерасшифрованный
+	// пакет (обычное дело при потерях/переупорядочивании на мобильной сети),
+	// и на настоящий сбой сокета. Раньше любая из них рвала всю сессию —
+	// один битый пакет убивал воркера. Ретраим всё, кроме net.Error (реальная
+	// сетевая ошибка/таймаут/закрытие), как уже делает клиентский obfsDirectConn.Read.
+	for {
+		n, _, err := c.pc.ReadFrom(b)
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) {
+				return 0, err
+			}
+			continue
+		}
+		return n, nil
+	}
+}
+func (c *directConn) Write(b []byte) (int, error)        { return c.pc.WriteTo(b, c.addr) }
+func (c *directConn) Close() error                       { return c.pc.Close() }
+func (c *directConn) LocalAddr() net.Addr                { return c.pc.LocalAddr() }
+func (c *directConn) RemoteAddr() net.Addr               { return c.addr }
+func (c *directConn) SetDeadline(t time.Time) error      { return c.pc.SetDeadline(t) }
+func (c *directConn) SetReadDeadline(t time.Time) error  { return c.pc.SetReadDeadline(t) }
+func (c *directConn) SetWriteDeadline(t time.Time) error { return c.pc.SetWriteDeadline(t) }
+
 func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	atomic.AddInt64(&totalConns, 1)
 
 	var connDeviceID string
 
-	dtlsConn, ok := clientConn.(*dtls.Conn)
-	if !ok {
-		return
-	}
-
-	hctx, hcancel := context.WithTimeout(ctx, 60*time.Second)
-	if err := dtlsConn.HandshakeContext(hctx); err != nil {
+	// DTLS-клиенты (обратная совместимость): хендшейк перед чтением данных.
+	// Прямые (-notls) клиенты приходят уже как directConn — RTP-obfs AEAD
+	// уже дал шифрование+аутентификацию, второй хендшейк не нужен.
+	if dtlsConn, ok := clientConn.(*dtls.Conn); ok {
+		hctx, hcancel := context.WithTimeout(ctx, 60*time.Second)
+		if err := dtlsConn.HandshakeContext(hctx); err != nil {
+			hcancel()
+			log.Printf("[DTLS] [ERR] Handshake failed from %s: %v", clientConn.RemoteAddr().String(), err)
+			return
+		}
 		hcancel()
-		log.Printf("[DTLS] [ERR] Handshake failed from %s: %v", clientConn.RemoteAddr().String(), err)
-		return
 	}
-	hcancel()
 
 	atomic.AddInt32(&activeConns, 1)
 	defer atomic.AddInt32(&activeConns, -1)
@@ -2085,13 +2895,25 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			dev, exists := db.Devices[deviceID]
 			if !exists {
 				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
+			}
+			// Устройство могло быть создано раньше только Raw-путём
+			// (GETCONF_RAW, см. handleConnRaw) — там PrivKey/PubKey никогда
+			// не генерируются, только IP/RawIP. Без этой проверки такое
+			// устройство при первом переключении на VPN(WireGuard) получало
+			// бы конфиг с пустым PrivateKey навсегда (BadConfigException на
+			// клиенте при каждой попытке), потому что ветка ниже раньше
+			// генерировала ключи только для !exists.
+			if dev.PrivKey == "" || dev.PubKey == "" {
+				if dev.IP == "" {
+					dev.IP = getNextIP()
+				}
 				privB64, pubB64, keyErr := generateKeyPair()
 				if keyErr == nil && dev.IP != "" {
 					dev.PrivKey = privB64
 					dev.PubKey = pubB64
 					db.Devices[deviceID] = dev
 					saveDB()
-					log.Printf("[WG] Новое устройство %s (IP: %s)", deviceID, dev.IP)
+					log.Printf("[WG] Сгенерированы ключи для устройства %s (IP: %s)", deviceID, dev.IP)
 				} else {
 					dev = nil
 				}
@@ -2212,8 +3034,11 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			if err != nil {
 				return
 			}
-			// Skip DTLS keepalive packets (1-byte 0xFF ping from client)
-			if nn == 1 && (*b)[0] == 0xFF {
+			// Skip keepalive packets: первый байт 0xFF, размер переменный
+			// (25-44 байта, было жёстко 1 байт) — см. комментарий в
+			// handleConnRaw. WireGuard-пакеты всегда начинаются с байта
+			// типа сообщения 1-4, никогда не 0xFF.
+			if nn > 0 && (*b)[0] == 0xFF {
 				continue
 			}
 			atomic.AddInt64(&totalBytesFromClient, int64(nn))
@@ -2269,6 +3094,7 @@ type ObfsConfig struct {
 	PayloadType uint8
 	PaddingMax  int
 }
+
 var aeadCache sync.Map
 
 func getAEAD(key []byte) (cipher.AEAD, error) {
@@ -2328,7 +3154,16 @@ func obfsBuildNonce(ssrc uint32, seq uint16, ts uint32) []byte {
 	return n
 }
 
-func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]byte, error) {
+// rtpHeaderLen — bare 12-байтный RTP заголовок, без RFC 8285 extension.
+// Должно совпадать байт-в-байт с go_client/obfs.go — отдельный Go-модуль,
+// общий код не шарится.
+const rtpHeaderLen = 12
+
+// obfsWrapPacket упаковывает payload в RTP-obfs кадр. dst переиспользуется
+// как выходной буфер, если его вместимости хватает (передайте nil, чтобы
+// всегда аллоцировать новый — используется клиентской стороной go_client,
+// отдельным модулем, где эта функция не переиспользуется построчно).
+func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState, dst []byte) ([]byte, error) {
 	if len(key) != wrapKeyLen {
 		return nil, fmt.Errorf("obfs: key must be %d bytes (got %d)", wrapKeyLen, len(key))
 	}
@@ -2351,10 +3186,15 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 		padRand = int(rndBuf[0]) % cfg.PaddingMax
 	}
 	padTotal := padRand + 1
-	outLen := 12 + len(payload) + chacha20poly1305.Overhead + padTotal
-	out := make([]byte, outLen)
+	outLen := rtpHeaderLen + len(payload) + chacha20poly1305.Overhead + padTotal
+	out := dst
+	if cap(out) < outLen {
+		out = make([]byte, outLen)
+	} else {
+		out = out[:outLen]
+	}
 
-	out[0] = 0x80 | 0x20
+	out[0] = 0x80 | 0x20 // V=2, X=0 (no extension), P=1 (padding present)
 	out[1] = cfg.PayloadType & 0x7F
 	binary.BigEndian.PutUint16(out[2:4], seq)
 	binary.BigEndian.PutUint32(out[4:8], ts)
@@ -2364,8 +3204,8 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("obfs: cipher init: %w", err)
 	}
-	sealed := aead.Seal(out[12:12], nonce, payload, out[:12])
-	padStart := 12 + len(sealed)
+	sealed := aead.Seal(out[rtpHeaderLen:rtpHeaderLen], nonce, payload, out[:rtpHeaderLen])
+	padStart := rtpHeaderLen + len(sealed)
 	if padRand > 0 {
 		rand.Read(out[padStart : padStart+padRand])
 	}
@@ -2377,7 +3217,7 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	if len(key) != wrapKeyLen {
 		return 0, fmt.Errorf("obfs: key must be %d bytes (got %d)", wrapKeyLen, len(key))
 	}
-	if len(wire) < 13 {
+	if len(wire) < rtpHeaderLen+1 {
 		return 0, errors.New("obfs: packet too short")
 	}
 	if (wire[0] >> 6) != 2 {
@@ -2390,12 +3230,12 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	payloadEnd := len(wire)
 	if wire[0]&0x20 != 0 {
 		padLen := int(wire[len(wire)-1])
-		if padLen == 0 || padLen > payloadEnd-12 {
+		if padLen == 0 || padLen > payloadEnd-rtpHeaderLen {
 			return 0, fmt.Errorf("obfs: invalid padding length %d", padLen)
 		}
 		payloadEnd -= padLen
 	}
-	ciphertextLen := payloadEnd - 12
+	ciphertextLen := payloadEnd - rtpHeaderLen
 	if ciphertextLen <= chacha20poly1305.Overhead {
 		return 0, errors.New("obfs: no payload")
 	}
@@ -2407,14 +3247,14 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("obfs: cipher init: %w", err)
 	}
-	plain, err := aead.Open(dst[:0], nonce, wire[12:payloadEnd], wire[:12])
+	plain, err := aead.Open(dst[:0], nonce, wire[rtpHeaderLen:payloadEnd], wire[:rtpHeaderLen])
 	if err != nil {
 		return 0, fmt.Errorf("obfs: auth: %w", err)
 	}
 	return len(plain), nil
 }
 func obfsIsRTPPacket(wire []byte) bool {
-	if len(wire) < 13 {
+	if len(wire) < rtpHeaderLen+1 {
 		return false
 	}
 	if (wire[0] >> 6) != 2 {
@@ -2424,11 +3264,19 @@ func obfsIsRTPPacket(wire []byte) bool {
 	return pt == 111 || pt == 96
 }
 
+// socketBufSize — размер SO_RCVBUF/SO_SNDBUF на общем UDP-сокете листенера.
+// Без явной установки сокет сидит на дефолте ядра (обычно ~212KB), хотя
+// net.core.rmem_max/wmem_max уже подняты sysctl'ом (см. enableBBR). При
+// сотнях одновременных клиентов на одном сокете дефолтный буфер — источник
+// молчаливых ENOBUFS-дропов под всплеском нагрузки.
+const socketBufSize = 8 * 1024 * 1024
+
 func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (dtlsnet.PacketListener, error) {
 	if keys == nil || keys.Count() == 0 {
 		return nil, errors.New("wrap: no active keys")
 	}
-	inner, err := pionudp.Listen("udp", addr)
+	lc := pionudp.ListenConfig{ReadBufferSize: socketBufSize, WriteBufferSize: socketBufSize}
+	inner, err := lc.Listen("udp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("wrap: udp listen: %w", err)
 	}
@@ -2464,9 +3312,27 @@ type wrapPacketConn struct {
 	obfsWrite *ObfsState
 }
 
+// wrapReadBufPool — промежуточный буфер под RTP-заголовок+AEAD-тег+padding
+// поверх p (см. ReadFrom ниже). Раньше аллоцировался заново на КАЖДЫЙ входящий
+// пакет — при сотнях клиентов и тысячах pps это заметное GC-давление в
+// downlink-пути. p приходит из bufPool (1600 байт, см. handleConn/handleConnRaw),
+// поэтому 1700 с запасом хватает под len(p)+80.
+var wrapReadBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 1700)
+		return &b
+	},
+}
+
 func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	// Extra space for RTP header (12) + AEAD tag (16) + padding.
-	buf := make([]byte, len(p)+80)
+	bufPtr := wrapReadBufPool.Get().(*[]byte)
+	defer wrapReadBufPool.Put(bufPtr)
+	need := len(p) + 80
+	if cap(*bufPtr) < need {
+		*bufPtr = make([]byte, need)
+	}
+	buf := (*bufPtr)[:need]
 	n, addr, err := c.inner.ReadFrom(buf)
 	if err != nil {
 		return 0, addr, err
@@ -2528,7 +3394,9 @@ func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		c.obfsCfg = NewObfsConfig("audio")
 		c.obfsWrite = NewObfsState()
 	}
-	wrapped, wErr := obfsWrapPacket(c.key, p, c.obfsCfg, c.obfsWrite)
+	bufPtr := wrapReadBufPool.Get().(*[]byte)
+	defer wrapReadBufPool.Put(bufPtr)
+	wrapped, wErr := obfsWrapPacket(c.key, p, c.obfsCfg, c.obfsWrite, *bufPtr)
 	if wErr != nil {
 		return 0, fmt.Errorf("obfs wrap: %w", wErr)
 	}

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Notes
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -37,13 +38,18 @@ import com.wdtt.client.ConnectionPipelineCard
 import com.wdtt.client.LogEntry
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.WDTTColors
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogsTab() {
     val context = LocalContext.current
     val currentLogs by TunnelManager.logs.collectAsStateWithLifecycle()
+    val lastFatalError by TunnelManager.lastFatalError.collectAsStateWithLifecycle()
     val statsText by TunnelManager.stats.collectAsStateWithLifecycle()
     val isRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val isConnecting by TunnelManager.isConnecting.collectAsStateWithLifecycle()
@@ -106,11 +112,58 @@ fun LogsTab() {
                 }) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = MaterialTheme.colorScheme.primary)
                 }
+                IconButton(onClick = {
+                    val uiLogText = buildString {
+                        if (pinnedStatsMessage != null) {
+                            appendLine(pinnedStatsMessage)
+                        }
+                        scrollableLogs.forEach { appendLine("${it.message} (x${it.count})") }
+                    }.trim()
+                    exportFullLog(context, uiLogText)
+                }) {
+                    Icon(Icons.Default.Share, contentDescription = "Export logs", tint = MaterialTheme.colorScheme.primary)
+                }
             }
         }
 
         val isDark = isSystemInDarkTheme()
         val terminalBg = if (isDark) WDTTColors.terminalBgDark else WDTTColors.terminalBg
+
+        // Переживает clearLogs() (вызывается на каждый новый старт подключения) —
+        // без этого текст последней фатальной ошибки исчезал раньше, чем
+        // пользователь успевал его прочитать/скопировать при повторном нажатии
+        // "Подключить".
+        if (lastFatalError != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = lastFatalError.orEmpty(),
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("WDTT Error", lastFatalError.orEmpty()))
+                        Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy error", tint = MaterialTheme.colorScheme.onErrorContainer)
+                    }
+                    IconButton(onClick = { TunnelManager.lastFatalError.value = null }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Dismiss", tint = MaterialTheme.colorScheme.onErrorContainer)
+                    }
+                }
+            }
+        }
 
         Card(
             modifier = Modifier.fillMaxSize(),
@@ -186,6 +239,10 @@ fun LogsTab() {
                     exit = fadeOut() + shrinkVertically(),
                 ) {
                     Column {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().height(8.dp),
+                            color = WDTTColors.terminalBlue.copy(alpha = if (isDark) 0.10f else 0.08f),
+                        ) {}
                         ConnectionPipelineCard(
                             state = pipelineState,
                             isDark = isDark,
@@ -320,6 +377,72 @@ fun LogLine(entry: LogEntry) {
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Собирает в один файл и открытый шаринг:
+ *  1. UI-лог (то же, что и кнопка "Копировать") — уже распарсенные, читаемые
+ *     события: этапы подключения, [RAW-DIAG], статистика.
+ *  2. Реальный logcat процесса — всё остальное, включая необработанные
+ *     исключения/стектрейсы и системные события (ANR, kill фонового сервиса),
+ *     которые ни один парсер в UI-лог не превращает. Без READ_LOGS-разрешения
+ *     (недоступно обычным приложениям на современном Android без root)
+ *     `logcat -d` возвращает только строки ЭТОГО процесса — этого достаточно,
+ *     так как весь наш Log.i/w/e и вывод go_client-подпроцесса попадают
+ *     именно туда.
+ */
+private fun exportFullLog(context: android.content.Context, uiLogText: String) {
+    MainScope().launch(Dispatchers.IO) {
+        try {
+            val process = ProcessBuilder("logcat", "-d", "-v", "threadtime")
+                .redirectErrorStream(true)
+                .start()
+            val logcatOutput = process.inputStream.bufferedReader().readText()
+            process.waitFor()
+
+            val output = buildString {
+                appendLine("=== Информация о среде ===")
+                appendLine("Приложение: qWDTT ${com.wdtt.client.BuildConfig.VERSION_NAME} (build ${com.wdtt.client.BuildConfig.VERSION_CODE})")
+                appendLine("Устройство: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (${android.os.Build.DEVICE})")
+                appendLine("Android: ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})")
+                appendLine()
+                appendLine("=== Текущее подключение ===")
+                appendLine(TunnelManager.connectionDiagnosticsSummary())
+                appendLine()
+                appendLine("=== UI-лог qWDTT ===")
+                appendLine(uiLogText)
+                appendLine()
+                appendLine("=== logcat ===")
+                append(logcatOutput)
+            }
+
+            val dir = java.io.File(context.cacheDir, "logs").apply { mkdirs() }
+            val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+            val file = java.io.File(dir, "wdtt_log_$timestamp.txt")
+            file.writeText(output)
+
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context, "${context.packageName}.fileprovider", file
+            )
+            val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            withContext(Dispatchers.Main) {
+                context.startActivity(
+                    android.content.Intent.createChooser(shareIntent, "Отправить лог").apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                )
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Не удалось выгрузить лог: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }

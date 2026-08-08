@@ -4,7 +4,6 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
@@ -18,7 +17,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -74,8 +72,27 @@ class TunnelService : Service() {
                         SettingsStore.awaitMigrations(appContext)
                         val basePeer = intent.getStringExtra("peer")?.takeIf { it.isNotEmpty() } ?: store.peer.first()
                         val manualPortsEnabled = store.manualPortsEnabled.first()
+                        val connectionMode = SettingsStore.normalizeConnectionMode(
+                            intent.getStringExtra("connection_mode")?.takeIf { it.isNotEmpty() }
+                                ?: store.connectionMode.first()
+                        )
+                        val isRawTun = connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN
                         val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
-                        val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverDtlsPort)
+                        // Raw и так всегда без DTLS (инвариант архитектуры, не опция) — если этот
+                        // переключатель читать безусловно, сохранённое значение от классического
+                        // VPN-режима "утекает" в rawtun: лишний -notls в cmd и лишняя плашка
+                        // "[СЕТЬ] Транспорт: без DTLS" на экране логов при активном Raw.
+                        val noDtlsEnabled = !isRawTun && store.noDtlsEnabled.first()
+                        val serverDirectPort = if (manualPortsEnabled) store.serverDirectPort.first() else 56002
+                        val serverRawPort = if (manualPortsEnabled) store.serverRawPort.first() else 56003
+                        val effectiveServerPort = when {
+                            isRawTun -> serverRawPort
+                            noDtlsEnabled -> serverDirectPort
+                            else -> serverDtlsPort
+                        }
+                        val peerWithPort = if (basePeer.isBlank()) basePeer
+                            else if (isRawTun || noDtlsEnabled) PeerAddress.withPort(basePeer, effectiveServerPort)
+                            else PeerAddress.ensurePort(basePeer, effectiveServerPort)
                         val vkAnonPath = SettingsStore.normalizeVkAnonPath(
                             intent.getStringExtra("vk_anon_path")?.takeIf { it.isNotEmpty() }
                                 ?: store.vkAnonPath.first()
@@ -85,10 +102,6 @@ class TunnelService : Service() {
                         val obfsMode = SettingsStore.normalizeObfsMode(
                             intent.getStringExtra("obfs_mode")?.takeIf { it.isNotEmpty() }
                                 ?: store.obfsMode.first()
-                        )
-                        val connectionMode = SettingsStore.normalizeConnectionMode(
-                            intent.getStringExtra("connection_mode")?.takeIf { it.isNotEmpty() }
-                                ?: store.connectionMode.first()
                         )
                         val socksPort = SettingsStore.normalizeSocksPort(
                             intent.getIntExtra("socks_port", 0).takeIf { it > 0 }
@@ -112,6 +125,8 @@ class TunnelService : Service() {
                             obfsMode = obfsMode,
                             connectionMode = connectionMode,
                             socksPort = socksPort,
+                            noDtls = noDtlsEnabled,
+                            turnTcp = store.turnTcpEnabled.first(),
                             detailedLogs = store.detailedLogs.first()
                         )
                         launch(Dispatchers.Main) {
@@ -157,8 +172,20 @@ class TunnelService : Service() {
                 SettingsStore.awaitMigrations(appContext)
                 val basePeer = store.peer.first()
                 val manualPortsEnabled = store.manualPortsEnabled.first()
+                val connectionModeRestore = SettingsStore.normalizeConnectionMode(store.connectionMode.first())
+                val isRawTunRestore = connectionModeRestore == SettingsStore.CONNECTION_MODE_RAWTUN
                 val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
-                val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverDtlsPort)
+                val noDtlsEnabled = !isRawTunRestore && store.noDtlsEnabled.first()
+                val serverDirectPort = if (manualPortsEnabled) store.serverDirectPort.first() else 56002
+                val serverRawPort = if (manualPortsEnabled) store.serverRawPort.first() else 56003
+                val effectiveServerPort = when {
+                    isRawTunRestore -> serverRawPort
+                    noDtlsEnabled -> serverDirectPort
+                    else -> serverDtlsPort
+                }
+                val peerWithPort = if (basePeer.isBlank()) basePeer
+                    else if (isRawTunRestore || noDtlsEnabled) PeerAddress.withPort(basePeer, effectiveServerPort)
+                    else PeerAddress.ensurePort(basePeer, effectiveServerPort)
                 val params = TunnelParams(
                     peer = peerWithPort,
                     vkHashes = store.vkHashes.first(),
@@ -175,6 +202,8 @@ class TunnelService : Service() {
                     obfsMode = SettingsStore.normalizeObfsMode(store.obfsMode.first()),
                     connectionMode = SettingsStore.normalizeConnectionMode(store.connectionMode.first()),
                     socksPort = SettingsStore.normalizeSocksPort(store.socksPort.first()),
+                    noDtls = noDtlsEnabled,
+                    turnTcp = store.turnTcpEnabled.first(),
                     detailedLogs = store.detailedLogs.first()
                 )
                 if (params.peer.isNotEmpty() && params.vkHashes.isNotEmpty()) {

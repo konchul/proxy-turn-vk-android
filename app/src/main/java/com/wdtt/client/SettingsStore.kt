@@ -47,6 +47,13 @@ class SettingsStore(context: Context) {
         private val MANUAL_PORTS_ENABLED = booleanPreferencesKey("manual_ports_enabled")
         private val SERVER_DTLS_PORT = intPreferencesKey("server_dtls_port")
         private val SERVER_WG_PORT = intPreferencesKey("server_wg_port")
+        /** Экспериментально: RTP-obfs AEAD без DTLS (на сервере нужен -listen-direct). */
+        private val NO_DTLS_ENABLED = booleanPreferencesKey("no_dtls_enabled")
+        private val SERVER_DIRECT_PORT = intPreferencesKey("server_direct_port")
+        /** Порт сервера для raw-IP режима (на сервере нужен -listen-raw). */
+        private val SERVER_RAW_PORT = intPreferencesKey("server_raw_port")
+        /** Соединяться с TURN-relay по TCP вместо UDP (обход UDP-душения на некоторых сетях). */
+        private val TURN_TCP_ENABLED = booleanPreferencesKey("turn_tcp_enabled")
         private val SNI = stringPreferencesKey("sni")
 
         private val DEPLOY_IP = stringPreferencesKey("deploy_ip")
@@ -92,8 +99,8 @@ class SettingsStore(context: Context) {
         // ═══ VPN Exclusions Mode ═══
         private val IS_WHITELIST = booleanPreferencesKey("is_whitelist")
         private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
-        /** Российские IPv4-подсети не идут через WireGuard (AllowedIPs без RU). */
-        private val RUNET_DIRECT = booleanPreferencesKey("runet_direct")
+        /** Обход VPN: IP/CIDR/wildcard/домены, по одному на строку. */
+        private val BYPASS_ROUTES = stringPreferencesKey("bypass_routes")
 
         // ═══ Theme Mode ═══
         private val THEME_MODE = stringPreferencesKey("theme_mode") // "system", "light", "dark"
@@ -109,11 +116,6 @@ class SettingsStore(context: Context) {
         private val UPDATE_CHECK_INTERVAL_HOURS = intPreferencesKey("update_check_interval_hours")
         private val UPDATE_POSTPONE_UNTIL = longPreferencesKey("update_postpone_until")
         private val UPDATE_POSTPONE_VERSION = stringPreferencesKey("update_postpone_version")
-        private val UPDATE_DIALOG_LAST_SHOWN_VERSION = stringPreferencesKey("update_dialog_last_shown_version")
-        private val UPDATE_DIALOG_LAST_SHOWN_AT = longPreferencesKey("update_dialog_last_shown_at")
-        private val UPDATE_DIALOG_LAST_ACTION_VERSION = stringPreferencesKey("update_dialog_last_action_version")
-        private val UPDATE_DIALOG_LAST_ACTION = stringPreferencesKey("update_dialog_last_action")
-        private val UPDATE_DIALOG_LAST_ACTION_AT = longPreferencesKey("update_dialog_last_action_at")
         private val INCLUDE_BETA_UPDATES = booleanPreferencesKey("include_beta_updates")
         private val SUPPORT_NOTICE_SHOWN_VERSION_CODE = intPreferencesKey("support_notice_shown_version_code")
 
@@ -123,6 +125,8 @@ class SettingsStore(context: Context) {
         // ═══ Поведение ═══
         private val AUTO_SWITCH_TO_LOGS = booleanPreferencesKey("auto_switch_to_logs")
         private val STOP_ON_WIFI = booleanPreferencesKey("stop_on_wifi")
+        /** Автоперерезолв доменов обхода и reload WG при смене IP. */
+        private val BYPASS_AUTO_REFRESH = booleanPreferencesKey("bypass_auto_refresh")
         private val CONNECTION_PIPELINE_ENABLED = booleanPreferencesKey("connection_pipeline_enabled")
         private val SORT_PROFILES_BY_PING = booleanPreferencesKey("sort_profiles_by_ping")
         /** vpn = Android VpnService; socks = локальный SOCKS5 без VPN. */
@@ -137,14 +141,14 @@ class SettingsStore(context: Context) {
         const val DEFAULT_SOCKS_PORT = 1080
         const val CONNECTION_MODE_VPN = "vpn"
         const val CONNECTION_MODE_SOCKS = "socks"
+        /** rawtun = сырые IP-пакеты напрямую в go_client через TUN-fd, вообще без WireGuard. */
+        const val CONNECTION_MODE_RAWTUN = "rawtun"
 
         private val HAS_SEEN_WELCOME_DIALOG = booleanPreferencesKey("has_seen_welcome_dialog")
         private val LAST_SEEN_VERSION_CODE = intPreferencesKey("last_seen_version_code")
 
         /** versionCode, при первом запуске после которого включается VKCalls у всех. */
         const val VKCALLS_FORCE_MIGRATION_VERSION = 23
-        /** versionCode: принудительно выключаем «Рунет напрямую» (мало где стабильно). */
-        const val RUNET_DIRECT_FORCE_OFF_VERSION = 31
 
         private val migrationMutex = Mutex()
         private val migrationReady = CompletableDeferred<Unit>()
@@ -161,10 +165,10 @@ class SettingsStore(context: Context) {
         }
 
         fun normalizeConnectionMode(mode: String?): String {
-            return if (mode.equals(CONNECTION_MODE_SOCKS, ignoreCase = true)) {
-                CONNECTION_MODE_SOCKS
-            } else {
-                CONNECTION_MODE_VPN
+            return when {
+                mode.equals(CONNECTION_MODE_SOCKS, ignoreCase = true) -> CONNECTION_MODE_SOCKS
+                mode.equals(CONNECTION_MODE_RAWTUN, ignoreCase = true) -> CONNECTION_MODE_RAWTUN
+                else -> CONNECTION_MODE_VPN
             }
         }
 
@@ -316,6 +320,12 @@ class SettingsStore(context: Context) {
     val manualPortsEnabled: Flow<Boolean> = dataStore.data.map { it[MANUAL_PORTS_ENABLED] ?: false }
     val serverDtlsPort: Flow<Int> = dataStore.data.map { it[SERVER_DTLS_PORT] ?: 56000 }
     val serverWgPort: Flow<Int> = dataStore.data.map { it[SERVER_WG_PORT] ?: 56001 }
+    /** Требует сервер с флагом -listen-direct и совместимую версию сервера. */
+    val noDtlsEnabled: Flow<Boolean> = dataStore.data.map { it[NO_DTLS_ENABLED] ?: false }
+    val serverDirectPort: Flow<Int> = dataStore.data.map { it[SERVER_DIRECT_PORT] ?: 56002 }
+    val serverRawPort: Flow<Int> = dataStore.data.map { it[SERVER_RAW_PORT] ?: 56003 }
+    /** TURN-relay по TCP вместо UDP — обход UDP-душения на некоторых сетях (напр. Ростелеком). По умолчанию включено. */
+    val turnTcpEnabled: Flow<Boolean> = dataStore.data.map { it[TURN_TCP_ENABLED] ?: true }
     val sni: Flow<String> = dataStore.data.map { it[SNI] ?: "" }
 
     val deployIp: Flow<String> = dataStore.data.map { it[DEPLOY_IP] ?: "" }
@@ -370,7 +380,7 @@ class SettingsStore(context: Context) {
 
     // ═══ VPN Exclusions Mode ═══
     val isWhitelist: Flow<Boolean> = dataStore.data.map { it[IS_WHITELIST] ?: false }
-    val runetDirect: Flow<Boolean> = dataStore.data.map { it[RUNET_DIRECT] ?: false }
+    val bypassRoutes: Flow<String> = dataStore.data.map { it[BYPASS_ROUTES] ?: "" }
 
     // ═══ Theme Mode ═══
     val hasSeenWelcomeDialog: Flow<Boolean> = dataStore.data
@@ -397,17 +407,14 @@ class SettingsStore(context: Context) {
     val updateCheckIntervalHours: Flow<Int> = dataStore.data.map { it[UPDATE_CHECK_INTERVAL_HOURS] ?: 24 }
     val updatePostponeUntil: Flow<Long> = dataStore.data.map { it[UPDATE_POSTPONE_UNTIL] ?: 0L }
     val updatePostponeVersion: Flow<String> = dataStore.data.map { it[UPDATE_POSTPONE_VERSION] ?: "" }
-    val updateDialogLastShownVersion: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_SHOWN_VERSION] ?: "" }
-    val updateDialogLastShownAt: Flow<Long> = dataStore.data.map { it[UPDATE_DIALOG_LAST_SHOWN_AT] ?: 0L }
-    val updateDialogLastActionVersion: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION_VERSION] ?: "" }
-    val updateDialogLastAction: Flow<String> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION] ?: "" }
-    val updateDialogLastActionAt: Flow<Long> = dataStore.data.map { it[UPDATE_DIALOG_LAST_ACTION_AT] ?: 0L }
     val includeBetaUpdates: Flow<Boolean> = dataStore.data.map { it[INCLUDE_BETA_UPDATES] ?: false }
     val supportNoticeShownVersionCode: Flow<Int> = dataStore.data.map { it[SUPPORT_NOTICE_SHOWN_VERSION_CODE] ?: 0 }
 
     // ═══ Поведение ═══
     val autoSwitchToLogs: Flow<Boolean> = dataStore.data.map { it[AUTO_SWITCH_TO_LOGS] ?: true }
     val stopOnWifi: Flow<Boolean> = dataStore.data.map { it[STOP_ON_WIFI] ?: false }
+    /** Периодический перерезолв доменов обхода. По умолчанию включён. */
+    val bypassAutoRefresh: Flow<Boolean> = dataStore.data.map { it[BYPASS_AUTO_REFRESH] ?: true }
     /** Схема этапов подключения на вкладке «Логи». По умолчанию включена. */
     val connectionPipelineEnabled: Flow<Boolean> = dataStore.data.map { it[CONNECTION_PIPELINE_ENABLED] ?: true }
     val sortProfilesByPing: Flow<Boolean> = dataStore.data.map { it[SORT_PROFILES_BY_PING] ?: false }
@@ -423,6 +430,10 @@ class SettingsStore(context: Context) {
 
     suspend fun saveStopOnWifi(enabled: Boolean) {
         dataStore.edit { prefs -> prefs[STOP_ON_WIFI] = enabled }
+    }
+
+    suspend fun saveBypassAutoRefresh(enabled: Boolean) {
+        dataStore.edit { prefs -> prefs[BYPASS_AUTO_REFRESH] = enabled }
     }
 
     suspend fun saveConnectionMode(mode: String) {
@@ -508,21 +519,6 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveUpdateDialogShown(version: String, shownAt: Long) {
-        dataStore.edit { prefs ->
-            prefs[UPDATE_DIALOG_LAST_SHOWN_VERSION] = version
-            prefs[UPDATE_DIALOG_LAST_SHOWN_AT] = shownAt
-        }
-    }
-
-    suspend fun saveUpdateDialogAction(version: String, action: String, actedAt: Long) {
-        dataStore.edit { prefs ->
-            prefs[UPDATE_DIALOG_LAST_ACTION_VERSION] = version
-            prefs[UPDATE_DIALOG_LAST_ACTION] = action
-            prefs[UPDATE_DIALOG_LAST_ACTION_AT] = actedAt
-        }
-    }
-
     suspend fun save(
         peer: String,
         vkHashes: String,
@@ -561,6 +557,14 @@ class SettingsStore(context: Context) {
             prefs[SERVER_WG_PORT] = serverWgPort
             prefs[LISTEN_PORT] = listenPort
         }
+    }
+
+    suspend fun saveServerRawPort(port: Int) {
+        dataStore.edit { prefs -> prefs[SERVER_RAW_PORT] = port.coerceIn(1, 65535) }
+    }
+
+    suspend fun saveTurnTcpEnabled(enabled: Boolean) {
+        dataStore.edit { prefs -> prefs[TURN_TCP_ENABLED] = enabled }
     }
 
     suspend fun saveGlobalVkHashes(hashes: String) {
@@ -713,9 +717,8 @@ class SettingsStore(context: Context) {
         }
     }
 
-    // Атомарное сохранение обоих параметров для исключения гонки при перезагрузке
-    suspend fun saveRunetDirect(enabled: Boolean) {
-        dataStore.edit { prefs -> prefs[RUNET_DIRECT] = enabled }
+    suspend fun saveBypassRoutes(raw: String) {
+        dataStore.edit { prefs -> prefs[BYPASS_ROUTES] = raw.trim() }
     }
 
     suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) {
@@ -781,11 +784,6 @@ class SettingsStore(context: Context) {
             }
             if (lastSeen < VKCALLS_FORCE_MIGRATION_VERSION && currentCode >= VKCALLS_FORCE_MIGRATION_VERSION) {
                 prefs[VK_ANON_PATH] = "vkcalls"
-            }
-            // 1.3.5: опция нестабильна на многих устройствах — сбрасываем в выкл. при обновлении.
-            // Пользователь может снова включить вручную в «Обход».
-            if (lastSeen < RUNET_DIRECT_FORCE_OFF_VERSION && currentCode >= RUNET_DIRECT_FORCE_OFF_VERSION) {
-                prefs[RUNET_DIRECT] = false
             }
             prefs[LAST_SEEN_VERSION_CODE] = currentCode
         }

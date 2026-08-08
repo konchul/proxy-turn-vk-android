@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -66,6 +67,10 @@ object TunnelManager {
     private const val MIN_RECONNECT_INTERVAL_MS = 10_000L
     private var activeHashIndex = 0 // 0: primary, 1: secondary
     private var currentParams: TunnelParams? = null
+    // Имя unix-сокета (без "@") для передачи TUN fd в go_client в режиме rawtun.
+    // Генерируется заново на каждый запуск в start(), читается в startLogReader().
+    @Volatile
+    private var rawTunSockName: String = ""
     private var lastContext: java.lang.ref.WeakReference<Context>? = null
     private var forceRegenerateUA = false // принудительная перегенерация UA при ошибках
     private var currentCaptchaMode = "wv" // режим обхода капчи: "wv" или "rjs"
@@ -84,6 +89,13 @@ object TunnelManager {
     val connectedSinceMs = MutableStateFlow(0L)
     val logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val unreadErrorCount = MutableStateFlow(0)
+    /**
+     * Последняя фатальная ошибка запуска, переживающая clearLogs(). Без этого
+     * пользователь не успевал прочитать/скопировать текст ошибки вроде
+     * "Ошибка запуска VPN: ..." — при повторном нажатии "Подключить" start()
+     * вызывает clearLogs() и сообщение исчезает мгновенно вместе со всем логом.
+     */
+    val lastFatalError = MutableStateFlow<String?>(null)
     val config = MutableStateFlow<String?>(null)
     val stats = MutableStateFlow("Ожидание данных...")
     val activeWorkers = MutableStateFlow(0)
@@ -110,6 +122,7 @@ object TunnelManager {
     val cooldownSeconds = MutableStateFlow(0)
     private var cooldownJob: Job? = null
     private var startJob: Job? = null
+    private var stopJob: Job? = null
     private var pipelineHideJob: Job? = null
     private var pipelineStepTimeoutJob: Job? = null
     @Volatile
@@ -190,6 +203,45 @@ object TunnelManager {
         updateLog("network_event", message, 2, false)
     }
 
+    /**
+     * Подробная диагностика подъёма Raw TUN (см. RawTunVpnService/RawTunEngine).
+     * В отличие от addNetworkLog — каждый вызов отдельная строка, не схлопывается
+     * с предыдущей: нужна полная последовательность шагов для разбора отказов
+     * на конкретных устройствах/версиях Android, а не только последний шаг.
+     *
+     * В обычном (не подробном) режиме в UI-лог НЕ идёт вообще — иначе экран
+     * логов забивается десятками уникальных строк на каждое подключение
+     * (ключ включает System.nanoTime(), так что дедупликация updateLog их
+     * никогда не схлопывает). Каждый вызывающий (RawTunEngine/RawTunVpnService/
+     * TunFdBridge) уже пишет то же сообщение напрямую в android.util.Log
+     * отдельно от этого метода — так что для logcat/кнопки "Поделиться" эти
+     * строки всё равно доступны независимо от режима. isError всегда
+     * показываем — реальная ошибка должна быть видна сразу, не только при
+     * включённом подробном режиме.
+     */
+    fun addRawDiagLog(message: String, isError: Boolean = false) {
+        if (!isDetailedLogsEnabled && !isError) return
+        val key = "raw_diag_${message.hashCode()}_${System.nanoTime()}"
+        updateLog(key, "[RAW-DIAG ${formatRawDiagTime()}] $message", 3, isError)
+    }
+
+    // HH:mm:ss.SSS — нужна именно миллисекундная точность, чтобы сопоставлять
+    // моменты Android-стороны (TunFdBridge.sendOnce) с моментами go_client
+    // (recvTunFD, свои [RAW-DIAG]-строки в stdout) при разборе таймлайна
+    // подъёма Raw TUN на устройствах, где он подвисает. Новый Calendar на
+    // каждый вызов — SimpleDateFormat не потокобезопасен, а этот лог зовут
+    // и из RawTunEngine (Dispatchers.IO), и из RawTunVpnService.
+    private fun formatRawDiagTime(): String {
+        val c = java.util.Calendar.getInstance()
+        return String.format(
+            java.util.Locale.US, "%02d:%02d:%02d.%03d",
+            c.get(java.util.Calendar.HOUR_OF_DAY),
+            c.get(java.util.Calendar.MINUTE),
+            c.get(java.util.Calendar.SECOND),
+            c.get(java.util.Calendar.MILLISECOND)
+        )
+    }
+
     private fun updateLog(key: String, message: String, priority: Int, isError: Boolean = false) {
         if (isError) {
             val list = logs.value
@@ -234,6 +286,7 @@ object TunnelManager {
         
         if (!isSwitching) {
             clearLogs()
+            lastFatalError.value = null
             // Флаг обновится в startJob через first()/collect; пока — кэш.
             currentParams = params
             resetConnectionPipeline()
@@ -283,6 +336,12 @@ object TunnelManager {
             }
             startJob = scope.launch {
             try {
+                // Дожидаемся завершения фонового teardown от предыдущего stop()
+                // (см. stop(): он больше не блокирует вызывающий поток через
+                // runBlocking, а запускает teardown в stopJob асинхронно) —
+                // иначе новый старт может поднять WireGuard/Raw поверх ещё не
+                // до конца погашенного предыдущего интерфейса.
+                stopJob?.join()
                 isDetailedLogsEnabled = runCatching {
                     SettingsStore(appContext).detailedLogs.first()
                 }.getOrDefault(false)
@@ -392,16 +451,42 @@ object TunnelManager {
                     false
                 )
 
+                if (params.noDtls) {
+                    cmd.add("-notls")
+                    updateLog(
+                        "no_dtls",
+                        "[СЕТЬ] Транспорт: без DTLS (RTP-obfs напрямую, нужен сервер с -listen-direct)",
+                        1,
+                        false
+                    )
+                }
+
+                if (params.turnTcp) {
+                    cmd.add("-turn-tcp")
+                }
+
                 val mode = SettingsStore.normalizeConnectionMode(params.connectionMode)
                 cmd.add("-mode")
-                cmd.add(mode)
-                if (mode == SettingsStore.CONNECTION_MODE_SOCKS) {
-                    val socks = params.socksListenAddress
-                    cmd.add("-socks")
-                    cmd.add(socks)
-                    updateLog("conn_mode", "[СЕТЬ] Режим: SOCKS5 ($socks), без VPN", 1, false)
-                } else {
-                    updateLog("conn_mode", "[СЕТЬ] Режим: VPN (WireGuard)", 1, false)
+                when {
+                    // rawtun: go_client понимает "-mode rawtun", TUN-fd прилетит позже через unix-сокет.
+                    mode == SettingsStore.CONNECTION_MODE_RAWTUN -> {
+                        cmd.add("rawtun")
+                        rawTunSockName = TunFdBridge.newSocketName()
+                        cmd.add("-tun-fd-sock")
+                        cmd.add(TunFdBridge.goSockPath(rawTunSockName))
+                        updateLog("conn_mode", "[СЕТЬ] Режим: VPN (raw-IP, без WireGuard)", 1, false)
+                    }
+                    mode == SettingsStore.CONNECTION_MODE_VPN -> {
+                        cmd.add("vpn")
+                        updateLog("conn_mode", "[СЕТЬ] Режим: VPN (WireGuard)", 1, false)
+                    }
+                    else -> {
+                        cmd.add("socks")
+                        val socks = params.socksListenAddress
+                        cmd.add("-socks")
+                        cmd.add(socks)
+                        updateLog("conn_mode", "[СЕТЬ] Режим: SOCKS5 ($socks), без VPN", 1, false)
+                    }
                 }
 
                 setConnectionPipelineCurrent(ConnectionStep.DNS)
@@ -522,6 +607,28 @@ object TunnelManager {
         }
     }
 
+    /**
+     * Останавливает raw-VPN, если текущая (ещё не сброшенная) сессия была в
+     * этом режиме — синхронно (blocking), чтобы к моменту возврата из stop()
+     * TUN/VpnService уже были закрыты. Раньше это запускалось fire-and-forget
+     * в отдельной корутине и не дожидалось завершения — при быстром
+     * переключении режима (Raw -> VPN) новый go_client мог начать
+     * подниматься раньше, чем предыдущая Raw-сессия успевала освободить
+     * ресурсы, что иногда приводило к "WireGuard start failed" на новом
+     * старте. stopLocked() внутри RawTunEngine.stop() лёгкая (closeTun +
+     * stopService), так что runBlocking здесь не создаёт заметной задержки.
+     */
+    private fun stopRawTunIfNeeded() {
+        if (currentParams?.isRawTunMode != true) return
+        val ctx = lastContext?.get() ?: return
+        runBlocking { runCatching { RawTunEngine.stop(ctx) } }
+    }
+
+    /** Вызывается из RawTunVpnService.onRevoke() — система сама отозвала VPN-разрешение. */
+    fun onRawTunRevoked() {
+        RawTunEngine.onVpnRevoked()
+    }
+
     private fun handleReconnectFailed(reason: String) {
         transportRestartInProgress = false
         isReconnecting.value = false
@@ -538,6 +645,8 @@ object TunnelManager {
             val reader = process?.inputStream?.bufferedReader() ?: return@launch
             var collectingConfig = false
             val configBuilder = StringBuilder()
+            var collectingRawConfig = false
+            val rawConfigBuilder = StringBuilder()
 
             try {
                 var lastResetTime = System.currentTimeMillis()
@@ -833,6 +942,14 @@ object TunnelManager {
                         }
                         lineTrim.contains("Relay:") -> {
                             advanceConnectionPipeline(ConnectionStep.TURN, ConnectionStep.DTLS)
+                        }
+                        lineTrim.contains("[ПРЯМОЙ]") -> {
+                            // Raw/no-DTLS: RTP-obfs AEAD напрямую поверх TURN, без DTLS вообще —
+                            // шаг DTLS в пайплайне мгновенно завершается, а не показывает хендшейк,
+                            // которого в этом режиме реально нет (см. session.go, ветка NoDTLS/RawMode).
+                            advanceConnectionPipeline(ConnectionStep.DTLS, ConnectionStep.WORKERS)
+                        }
+                        lineTrim.contains("[DTLS] Рукопожатие") -> {
                             updateLog("dtls_start", "[DTLS] Рукопожатие (Handshake)...", 1, false)
                         }
                         lineTrim.contains("DTLS ОК") -> {
@@ -843,8 +960,12 @@ object TunnelManager {
                             advanceConnectionPipeline(ConnectionStep.WORKERS, transportPipelineStep())
                         }
                         
-                        // Ошибки (в конец)
-                        isError -> {
+                        // Ошибки (в конец). [RAW-DIAG] строки исключены: это диагностика
+                        // локальной fd-передачи (recvTunFD и т.п.), не сеть до сервера — их
+                        // текст ("connection refused" к unix-сокету go_client<->Android,
+                        // "FAILED") ложно триггерил connectionErrorHint() с подсказкой
+                        // "Сервер отклонил подключение", хотя сервер тут вообще не при чём.
+                        isError && !lineTrim.contains("[RAW-DIAG") -> {
                             val pipeParts = lineTrim.split(" | ", limit = 2)
                             val mainLine = pipeParts[0]
                             val goHint = pipeParts.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }
@@ -890,19 +1011,76 @@ object TunnelManager {
                         configBuilder.clear()
                         setConnectionPipelineCurrent(transportPipelineStep())
                         return@forEachLine
+                    } else if (line.contains("╔") && line.contains("RAW Конфиг")) {
+                        collectingRawConfig = true
+                        rawConfigBuilder.clear()
+                        setConnectionPipelineCurrent(transportPipelineStep())
+                        return@forEachLine
+                    } else if (collectingRawConfig) {
+                        if (line.contains("╚")) {
+                            collectingRawConfig = false
+                            val raw = rawConfigBuilder.toString().trim()
+                            // Строки вида "IP = 10.70.x.y", "DNS = ...", "MTU = ..."
+                            val fields = raw.lines().associate { l ->
+                                val (k, v) = l.split("=", limit = 2).map { it.trim() }.let {
+                                    (it.getOrElse(0) { "" }) to (it.getOrElse(1) { "" })
+                                }
+                                k to v
+                            }
+                            val ip = fields["IP"].orEmpty()
+                            val dnsCsv = fields["DNS"].orEmpty()
+                            val mtu = fields["MTU"]?.toIntOrNull() ?: 1350
+                            val rawParams = currentParams
+                            val rawCtx = lastContext?.get()
+                            if (ip.isEmpty() || rawCtx == null) {
+                                failConnectionPipeline(ConnectionStep.RAW)
+                                updateLog("rawtun_conf_error", "[RAW] Некорректный конфиг от сервера или нет контекста", 99, true)
+                            } else {
+                                scope.launch(Dispatchers.Main) {
+                                    try {
+                                        RawTunEngine.start(rawCtx, ip, dnsCsv, mtu, rawTunSockName)
+                                        markConnectionPipelineCompleted(ConnectionStep.RAW)
+                                        finishConnectionPipeline()
+                                        stats.value = "RAW $ip"
+                                    } catch (e: Exception) {
+                                        failConnectionPipeline(ConnectionStep.RAW)
+                                        val msg = "Ошибка запуска raw-VPN: ${e.readableMessage()}"
+                                        updateLog("rawtun_start_error", msg, 99, true)
+                                        lastFatalError.value = msg
+                                    }
+                                }
+                            }
+                        } else if (line.contains("║")) {
+                            val content = line.replace("║", "").trim()
+                            if (content.isNotEmpty()) {
+                                rawConfigBuilder.appendLine(content)
+                            }
+                        }
+                        return@forEachLine
                     } else if (lineTrim.contains("[SOCKS] listening")) {
+                        val isRaw = currentParams?.isRawTunMode == true
                         updateLog(
                             "socks_ready",
                             "[SOCKS] listening ${currentParams?.socksListenAddress ?: lineTrim.substringAfter("listening").trim()}",
                             1,
                             false
                         )
-                        markConnectionPipelineCompleted(ConnectionStep.SOCKS)
-                        finishConnectionPipeline()
-                        stats.value = currentParams?.socksListenAddress?.let { "SOCKS $it" } ?: "SOCKS активен"
+                        // Raw использует тот же локальный Go-listener (userspace WG/
+                        // SOCKS-обвязка), что и настоящий SOCKS5-режим, но это не
+                        // финальный шаг для Raw — дальше идёт RAW-конфиг (см. блок
+                        // collectingRawConfig выше), поэтому здесь его не завершаем.
+                        if (!isRaw) {
+                            markConnectionPipelineCompleted(ConnectionStep.SOCKS)
+                            finishConnectionPipeline()
+                        }
+                        stats.value = if (isRaw) {
+                            "Ожидание данных..."
+                        } else {
+                            currentParams?.socksListenAddress?.let { "SOCKS $it" } ?: "SOCKS активен"
+                        }
                         return@forEachLine
                     } else if (lineTrim.contains("[SOCKS] Ошибка") || lineTrim.contains("[SOCKS] Сервер остановлен")) {
-                        failConnectionPipeline(ConnectionStep.SOCKS)
+                        failConnectionPipeline(transportPipelineStep())
                         updateLog("socks_error", lineTrim, 99, true)
                         return@forEachLine
                     } else if (collectingConfig) {
@@ -922,7 +1100,9 @@ object TunnelManager {
                                         finishConnectionPipeline()
                                     } catch (e: Exception) {
                                         failConnectionPipeline(ConnectionStep.VPN)
-                                        updateLog("vpn_start_error", "Ошибка запуска VPN: ${e.readableMessage()}", 99, true)
+                                        val msg = "Ошибка запуска VPN: ${e.readableMessage()}"
+                                        updateLog("vpn_start_error", msg, 99, true)
+                                        lastFatalError.value = msg
                                     }
                                 }
                             }
@@ -935,8 +1115,22 @@ object TunnelManager {
                         return@forEachLine
                     } else if (lineTrim.isNotEmpty() && !lineTrim.contains("ВОРКЕР") && !lineTrim.contains("ПИНГ") && !lineTrim.contains("Байт/сек")) {
                         // Если строка вообще ни подо что не подошла (например, panic или linker error)
+                        // [RAW-DIAG] из go_client (см. rawDiagf в go_client/raw_diag.go) — в обычном
+                        // (не подробном) режиме в UI-лог НЕ идут, только в logcat (см. ниже), иначе
+                        // экран логов забивается десятками технических строк на каждое подключение.
+                        // Реальный "немой зависон" всё равно будет виден: recvTunFD/readLoop таймауты
+                        // в итоге приводят к isError-строкам (FATAL_AUTH, таймауты пайплайна и т.п.),
+                        // которые показываются всегда независимо от режима.
+                        val isRawDiag = lineTrim.contains("[RAW-DIAG")
+                        if (isRawDiag) {
+                            // go_client's stdout не идёт через android.util.Log сам по
+                            // себе — без явного вызова здесь эти строки были бы видны
+                            // только в UI-логе приложения, но не в реальном logcat,
+                            // который тянет кнопка "Поделиться" на экране логов.
+                            if (isError) android.util.Log.w("Go", lineTrim) else android.util.Log.i("Go", lineTrim)
+                        }
                         if (isDetailedLogsEnabled || isError) {
-                            updateLog("go_unhandled_${lineTrim.hashCode()}", "[Go] $lineTrim", 90, isError)
+                            updateLog("go_unhandled_${lineTrim.hashCode()}", "[Go] $lineTrim", 3, isError)
                         }
                     }
                 }
@@ -1247,10 +1441,15 @@ object TunnelManager {
             VkAuthWebViewManager.notifyCancelled()
         } catch (_: Exception) {
         }
-        scope.launch(Dispatchers.Main) {
-            wgHelper?.stopTunnel()
-        }
-        killProcess()
+        // Мгновенно отражаем "выключено" в UI — кнопка не должна казаться
+        // зависшей, пока где-то внутри backend.setState()/RawTunEngine.stop()
+        // или stopGoProcessGracefully() (до 2.7с синхронных waitFor на
+        // SIGTERM/SIGKILL, если Go-процесс не отвечает на STOP) идёт
+        // медленный (или подвисший) системный вызов. Реальный teardown уходит
+        // в фоновую корутину (stopJob); следующий start() дожидается именно
+        // stopJob, а не блокирует вызывающий (обычно главный) поток.
+        watchdogJob?.cancel()
+        readerJob?.cancel()
         markRunning(false)
         isConnecting.value = false
         activeWorkers.value = 0
@@ -1260,8 +1459,21 @@ object TunnelManager {
         } else {
             cancelPipelineStepTimeout()
         }
-        currentParams = null
         ManlCaptchaWebViewManager.cancelCaptcha()
+
+        val paramsSnapshot = currentParams
+        val wgHelperSnapshot = wgHelper
+        currentParams = null
+        stopJob = scope.launch(Dispatchers.IO) {
+            runCatching { stopGoProcessGracefully() }
+            if (paramsSnapshot?.isRawTunMode == true) {
+                val ctx = lastContext?.get()
+                if (ctx != null) {
+                    runCatching { RawTunEngine.stop(ctx) }
+                }
+            }
+            runCatching { wgHelperSnapshot?.stopTunnel() }
+        }
     }
 
     fun reloadWireGuard() {
@@ -1461,18 +1673,56 @@ object TunnelManager {
             current = ConnectionStep.DNS,
             completed = emptySet(),
             visible = true,
-            socksMode = currentParams?.isSocksMode == true,
+            transportKind = when {
+                currentParams?.isRawTunMode == true -> ConnectionTransportKind.RAW
+                currentParams?.isSocksMode == true -> ConnectionTransportKind.SOCKS
+                else -> ConnectionTransportKind.VPN
+            },
+            // Raw и Direct(noDtls) идут напрямую RTP-obfs AEAD, без DTLS —
+            // шаг DTLS в схеме имеет смысл показывать только для
+            // классического VPN-режима.
+            dtlsUsed = currentParams?.let { !it.noDtls && !it.isRawTunMode } ?: true,
         )
         armPipelineStepTimeout(ConnectionStep.DNS)
     }
 
-    private fun transportPipelineStep(): ConnectionStep =
-        if (currentParams?.isSocksMode == true) ConnectionStep.SOCKS else ConnectionStep.VPN
+    private fun transportPipelineStep(): ConnectionStep = when {
+        currentParams?.isRawTunMode == true -> ConnectionStep.RAW
+        currentParams?.isSocksMode == true -> ConnectionStep.SOCKS
+        else -> ConnectionStep.VPN
+    }
 
     fun isSocksModeActive(): Boolean = currentParams?.isSocksMode == true
 
     fun activeSocksListenAddress(): String? =
-        currentParams?.takeIf { it.isSocksMode }?.socksListenAddress
+        currentParams?.takeIf { it.isSocksMode && !it.isRawTunMode }?.socksListenAddress
+
+    /**
+     * Сводка текущего режима/настроек подключения без секретов (пароли, VK-
+     * хеши, adminPassword и т.п. намеренно не включены) — для кнопки
+     * "Поделиться" на экране логов. peer — это адрес сервера, не секрет.
+     */
+    fun connectionDiagnosticsSummary(): String {
+        val p = currentParams ?: return "Нет активного/последнего подключения"
+        val mode = when {
+            p.isRawTunMode -> "Raw"
+            p.isSocksMode -> "SOCKS5"
+            else -> "VPN (WireGuard)"
+        }
+        return buildString {
+            appendLine("Режим: $mode")
+            appendLine("Сервер (peer): ${p.peer}")
+            appendLine("Протокол: ${p.protocol}")
+            appendLine("Воркеров на хеш: ${p.workersPerHash}")
+            appendLine("Маскировка: ${p.obfsMode}")
+            appendLine("VK auth: ${p.vkAuthMode} (${p.vkAnonPath})")
+            appendLine("Captcha: ${p.captchaMode}/${p.captchaSolveMethod}")
+            appendLine("DNS: ${p.goDnsArg}")
+            appendLine("Без DTLS: ${p.noDtls}")
+            appendLine("TURN по TCP: ${p.turnTcp}")
+            append("Подробные логи: ${p.detailedLogs}")
+        }
+    }
 
     private fun hideConnectionPipeline() {
         pipelineHideJob?.cancel()
@@ -1539,6 +1789,7 @@ object TunnelManager {
         startJob?.cancel()
         startJob = null
         if (running.value || process != null) {
+            stopRawTunIfNeeded()
             scope.launch(Dispatchers.Main) {
                 wgHelper?.stopTunnel()
             }
@@ -1736,12 +1987,21 @@ data class TunnelParams(
     val vkAnonPath: String = "vkcalls", // "vkcalls" или "legacy" (только anonymous)
     val goDnsArg: String = "yandex", // yandex/cloudflare/google, doh-*, custom:IP, doh:URL
     val obfsMode: String = "audio", // "audio" or "video"
-    val connectionMode: String = SettingsStore.CONNECTION_MODE_VPN, // vpn | socks
+    val connectionMode: String = SettingsStore.CONNECTION_MODE_VPN, // vpn | socks | box
     val socksPort: Int = SettingsStore.DEFAULT_SOCKS_PORT,
+    /** Экспериментально: RTP-obfs AEAD без DTLS. Нужен сервер с -listen-direct, peer уже должен указывать на direct-порт. */
+    val noDtls: Boolean = false,
+    /** TURN-relay по TCP вместо UDP — обход UDP-душения на некоторых сетях (напр. Ростелеком). */
+    val turnTcp: Boolean = false,
     val detailedLogs: Boolean = false
 ) {
+    /** Go поднимает локальный SOCKS5 (userspace WG) вместо Android GoBackend — верно и для socks, и для rawtun. */
     val isSocksMode: Boolean
-        get() = SettingsStore.normalizeConnectionMode(connectionMode) == SettingsStore.CONNECTION_MODE_SOCKS
+        get() = SettingsStore.normalizeConnectionMode(connectionMode) != SettingsStore.CONNECTION_MODE_VPN
+
+    /** rawtun: сырые IP-пакеты напрямую в go_client через TUN-fd, без WireGuard вообще (ни Android, ни userspace). */
+    val isRawTunMode: Boolean
+        get() = SettingsStore.normalizeConnectionMode(connectionMode) == SettingsStore.CONNECTION_MODE_RAWTUN
 
     val socksListenAddress: String
         get() = SettingsStore.socksListenAddress(socksPort)

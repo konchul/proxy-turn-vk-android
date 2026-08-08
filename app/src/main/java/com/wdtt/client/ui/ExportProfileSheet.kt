@@ -186,7 +186,7 @@ fun ExportProfileSheet(
     }
 }
 
-private fun generateQrCode(text: String, size: Int): Bitmap? {
+internal fun generateQrCode(text: String, size: Int): Bitmap? {
     return try {
         val hints = mapOf(EncodeHintType.MARGIN to 1)
         val bitMatrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints)

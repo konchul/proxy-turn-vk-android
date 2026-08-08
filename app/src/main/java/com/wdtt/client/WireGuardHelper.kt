@@ -73,25 +73,35 @@ class WireGuardHelper(context: Context) {
             // WDTT and VK calls must stay outside the VPN transport path.
             val settingsStore = SettingsStore(appContext)
             settingsStore.migrateLegacyWhitelistMode()
-            val savedExcluded = settingsStore.excludedApps.first()
-            val isWhitelist = settingsStore.isWhitelist.first()
-            val userSelected = savedExcluded.split(",").filter { it.isNotEmpty() }.toSet()
-            val transportPackages = setOf(appContext.packageName, "com.vkontakte.android", "com.vk.calls")
-
-            if (isWhitelist) {
-                val installedIncluded = userSelected
-                    .filter { it !in transportPackages && it.isInstalledPackage() }
+            if (FORCE_FULL_TUNNEL) {
+                Log.w("WG", "FORCE_FULL_TUNNEL: игнорирую фильтр приложений — весь трафик через туннель")
+                val transportOnly = setOf(appContext.packageName, "com.vkontakte.android", "com.vk.calls")
+                    .filter { it.isInstalledPackage() }
                     .toSet()
-                if (installedIncluded.isEmpty()) {
-                    throw IllegalStateException(EMPTY_WHITELIST_MESSAGE)
+                if (transportOnly.isNotEmpty()) {
+                    builder.excludeApplications(transportOnly)
                 }
-                builder.includeApplications(installedIncluded)
             } else {
-                val excluded = transportPackages.toMutableSet()
-                excluded.addAll(userSelected)
-                val installedExcluded = excluded.filter { it.isInstalledPackage() }.toSet()
-                if (installedExcluded.isNotEmpty()) {
-                    builder.excludeApplications(installedExcluded)
+                val savedExcluded = settingsStore.excludedApps.first()
+                val isWhitelist = settingsStore.isWhitelist.first()
+                val userSelected = savedExcluded.split(",").filter { it.isNotEmpty() }.toSet()
+                val transportPackages = setOf(appContext.packageName, "com.vkontakte.android", "com.vk.calls")
+
+                if (isWhitelist) {
+                    val installedIncluded = userSelected
+                        .filter { it !in transportPackages && it.isInstalledPackage() }
+                        .toSet()
+                    if (installedIncluded.isEmpty()) {
+                        throw IllegalStateException(EMPTY_WHITELIST_MESSAGE)
+                    }
+                    builder.includeApplications(installedIncluded)
+                } else {
+                    val excluded = transportPackages.toMutableSet()
+                    excluded.addAll(userSelected)
+                    val installedExcluded = excluded.filter { it.isInstalledPackage() }.toSet()
+                    if (installedExcluded.isNotEmpty()) {
+                        builder.excludeApplications(installedExcluded)
+                    }
                 }
             }
 
@@ -106,13 +116,25 @@ class WireGuardHelper(context: Context) {
                 if (peer.endpoint.isPresent) peerBuilder.parseEndpoint(peer.endpoint.get().toString())
                 if (peer.persistentKeepalive.isPresent) peerBuilder.parsePersistentKeepalive(peer.persistentKeepalive.get().toString())
             }
-            val runetDirect = settingsStore.runetDirect.first()
-            val allowedIps = if (runetDirect) {
-                RunetDirectHelper.allowedIpsV4(appContext)
+            val bypassExcludeCount: Int
+            if (FORCE_FULL_TUNNEL) {
+                Log.w("WG", "FORCE_FULL_TUNNEL: игнорирую bypass routes — 0.0.0.0/0")
+                peerBuilder.parseAllowedIPs("0.0.0.0/0")
+                BypassRoutes.noteAppliedAllowedIps("0.0.0.0/0")
+                bypassExcludeCount = 0
             } else {
-                "0.0.0.0/0"
+                val bypassRaw = settingsStore.bypassRoutes.first()
+                val bypass = BypassRoutes.buildAllowedIps(bypassRaw, appContext)
+                if (bypass.unresolved.isNotEmpty()) {
+                    Log.w("WG", "Bypass unresolved: ${bypass.unresolved.joinToString()}")
+                }
+                if (bypass.truncated) {
+                    Log.w("WG", "Bypass AllowedIPs truncated (excludes=${bypass.excludeCount})")
+                }
+                peerBuilder.parseAllowedIPs(bypass.allowedIps)
+                BypassRoutes.noteAppliedAllowedIps(bypass.allowedIps)
+                bypassExcludeCount = bypass.excludeCount
             }
-            peerBuilder.parseAllowedIPs(allowedIps)
 
             var finalConfig = Config.Builder()
                 .setInterface(newInterface)
@@ -125,9 +147,9 @@ class WireGuardHelper(context: Context) {
             try {
                 setTunnelUpWithRetry(nextTunnel, finalConfig)
             } catch (e: Exception) {
-                // Binder ~1MB: слишком длинный AllowedIPs → откат на полный туннель.
-                if (runetDirect && e.isTransactionTooLarge()) {
-                    Log.w("WG", "Runet direct AllowedIPs too large for Binder, falling back to 0.0.0.0/0")
+                // Binder ~1MB: слишком длинный AllowedIPs после вычитания → полный туннель.
+                if (bypassExcludeCount > 0 && e.isTransactionTooLarge()) {
+                    Log.w("WG", "Bypass AllowedIPs too large for Binder, falling back to 0.0.0.0/0")
                     val fallbackPeer = Peer.Builder()
                     firstPeer.let { peer ->
                         fallbackPeer.parsePublicKey(peer.publicKey.toBase64())
@@ -138,6 +160,7 @@ class WireGuardHelper(context: Context) {
                         }
                     }
                     fallbackPeer.parseAllowedIPs("0.0.0.0/0")
+                    BypassRoutes.noteAppliedAllowedIps("0.0.0.0/0")
                     finalConfig = Config.Builder()
                         .setInterface(newInterface)
                         .addPeer(fallbackPeer.build())
@@ -148,6 +171,10 @@ class WireGuardHelper(context: Context) {
                 }
             }
             sharedTunnel = nextTunnel
+            BypassRoutes.startAutoRefresh(TunnelManager.scope, appContext) {
+                TunnelManager.addNetworkLog("[ОБХОД] IP доменов изменились — обновляю маршруты VPN")
+                TunnelManager.reloadWireGuard()
+            }
             Log.d("WG", "WireGuard tunnel started successfully")
         } catch (e: Exception) {
             if (e.isEmptyWhitelistFailure()) {
@@ -189,6 +216,7 @@ class WireGuardHelper(context: Context) {
     suspend fun stopTunnel() = wgMutex.withLock {
         withContext(Dispatchers.IO) {
             try {
+                BypassRoutes.stopAutoRefresh()
                 sharedTunnel?.let {
                     backend.setState(it, Tunnel.State.DOWN, null)
                     sharedTunnel = null

@@ -90,6 +90,15 @@
                 android:value="persistent_vpn_tunnel_transport" />
         </service>
 
+        <service
+            android:name=".RawTunVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
 
         <activity
             android:name=".ManlCaptchaActivity"

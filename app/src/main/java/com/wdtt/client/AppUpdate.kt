@@ -19,8 +19,6 @@ import androidx.core.content.FileProvider
 
 const val UPDATE_CHECK_NEVER = -1
 const val DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 12
-const val UPDATE_DIALOG_ACTION_POSTPONED = "postponed"
-const val UPDATE_DIALOG_ACTION_UPDATE = "update"
 
 private const val UPDATE_LOG_TAG = "qWDTT"
 private const val GITHUB_RELEASES_URL = "https://api.github.com/repos/SpaceNeuroX/proxy-turn-vk-android/releases?per_page=30"

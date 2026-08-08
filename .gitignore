@@ -52,5 +52,7 @@ Desktop.ini
 msg.txt
 *.bat
 wdtt-server
+wg-turn-client
 .kotlin/
 .keys/
+.gradle-home/

@@ -37,6 +37,13 @@ object PeerAddress {
         return "$trimmed:$defaultPort"
     }
 
+    /** В отличие от [ensurePort] — всегда заменяет порт на [newPort], даже если он уже был указан. */
+    fun withPort(peer: String, newPort: Int): String {
+        val trimmed = peer.trim()
+        if (trimmed.isEmpty()) return trimmed
+        return "${host(trimmed)}:$newPort"
+    }
+
     fun httpEndpoint(peer: String, defaultPort: Int): String {
         val trimmed = peer.trim()
         val effectivePort = port(trimmed) ?: defaultPort

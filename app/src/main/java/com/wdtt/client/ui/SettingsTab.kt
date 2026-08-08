@@ -53,6 +53,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.PeerAddress
+import com.wdtt.client.BypassRoutes
 import com.wdtt.client.SettingsStore
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.TunnelService
@@ -160,6 +161,7 @@ fun SettingsTabContent(
     }
     val autoSwitchToLogs by settingsStore.autoSwitchToLogs.collectAsStateWithLifecycle(initialValue = true)
     val stopOnWifi by settingsStore.stopOnWifi.collectAsStateWithLifecycle(initialValue = false)
+    val bypassAutoRefresh by settingsStore.bypassAutoRefresh.collectAsStateWithLifecycle(initialValue = true)
     val connectionPipelineEnabled by settingsStore.connectionPipelineEnabled.collectAsStateWithLifecycle(initialValue = true)
     val connectionMode by settingsStore.connectionMode.collectAsStateWithLifecycle(
         initialValue = SettingsStore.CONNECTION_MODE_VPN
@@ -168,6 +170,12 @@ fun SettingsTabContent(
         initialValue = SettingsStore.DEFAULT_SOCKS_PORT
     )
     var socksPortInput by rememberSaveable { mutableStateOf(SettingsStore.DEFAULT_SOCKS_PORT.toString()) }
+    val turnTcpEnabled by settingsStore.turnTcpEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val serverRawPort by settingsStore.serverRawPort.collectAsStateWithLifecycle(initialValue = 56003)
+    var serverRawPortInput by rememberSaveable { mutableStateOf("56003") }
+    LaunchedEffect(serverRawPort) {
+        serverRawPortInput = serverRawPort.toString()
+    }
     val detailedLogs by settingsStore.detailedLogs.collectAsStateWithLifecycle(initialValue = false)
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = com.wdtt.client.DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
@@ -559,15 +567,19 @@ fun SettingsTabContent(
             hash2 = activeParts.getOrElse(1) { "" },
             hash3 = activeParts.getOrElse(2) { "" },
             hash4 = activeParts.getOrElse(3) { "" },
+            hash5 = activeParts.getOrElse(4) { "" },
+            hash6 = activeParts.getOrElse(5) { "" },
             captchaMode = captchaModeForCheck,
             vkAnonPath = vkAnonPath,
             goDnsArg = goDnsArgForCheck,
-            onSave = { h1, h2, h3, h4 ->
+            onSave = { h1, h2, h3, h4, h5, h6 ->
                 val cleaned1 = stripVkUrlStatic(h1)
                 val cleaned2 = stripVkUrlStatic(h2)
                 val cleaned3 = stripVkUrlStatic(h3)
                 val cleaned4 = stripVkUrlStatic(h4)
-                val combined = normalizeHashes(cleaned1, cleaned2, cleaned3, cleaned4)
+                val cleaned5 = stripVkUrlStatic(h5)
+                val cleaned6 = stripVkUrlStatic(h6)
+                val combined = normalizeHashes(cleaned1, cleaned2, cleaned3, cleaned4, cleaned5, cleaned6)
                 
                 scope.launch {
                     val currentProfileIdStr = settingsStore.currentProfileId.first()
@@ -828,6 +840,45 @@ fun SettingsTabContent(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+                            Text(
+                                "Автообновление обхода",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                "Каждые ${BypassRoutes.AUTO_REFRESH_INTERVAL_MS / 60_000} мин перерезолвить домены. Если IP сменились — кратко пересоберёт VPN (может рвать игру/звонки)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = bypassAutoRefresh,
+                            onCheckedChange = { enabled ->
+                                scope.launch {
+                                    settingsStore.saveBypassAutoRefresh(enabled)
+                                    if (!enabled) {
+                                        BypassRoutes.stopAutoRefresh()
+                                    } else if (TunnelManager.running.first()) {
+                                        BypassRoutes.startAutoRefresh(TunnelManager.scope, context) {
+                                            TunnelManager.addNetworkLog(
+                                                "[ОБХОД] IP доменов изменились — обновляю маршруты VPN"
+                                            )
+                                            TunnelManager.reloadWireGuard()
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
                     val subRefreshLabel = when (subscriptionAutoRefreshHours) {
                         SettingsStore.SUB_AUTO_REFRESH_NEVER -> "Выкл"
                         SettingsStore.SUB_AUTO_REFRESH_EVERY_OPEN -> "При каждом открытии"
@@ -1042,7 +1093,7 @@ fun SettingsTabContent(
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            "В режиме пользователя вкладка «Деплой» скрыта.",
+                            "В режиме пользователя вкладка «Серверы» скрыта.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1121,7 +1172,10 @@ fun SettingsTabContent(
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            "VPN — весь трафик через туннель. SOCKS5 — без VPN-разрешения; укажите прокси вручную в приложении (Telegram и т.п.).",
+                            "Оба варианта — полноценный VPN (весь трафик через туннель), отличается только " +
+                                "транспортный протокол. WireGuard — основной, проверенный. Raw — без " +
+                                "WireGuard вообще, эксперимент, нужен сервер с -listen-raw. SOCKS5 — без " +
+                                "VPN-разрешения, прокси вручную.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1136,7 +1190,18 @@ fun SettingsTabContent(
                                         scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_VPN) }
                                     }
                                 },
-                                label = { Text("VPN") },
+                                label = { Text("WG") },
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN,
+                                onClick = {
+                                    if (!tunnelRunning) {
+                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_RAWTUN) }
+                                    }
+                                },
+                                label = { Text("Raw") },
                                 enabled = !tunnelRunning,
                                 modifier = Modifier.weight(1f)
                             )
@@ -1150,6 +1215,30 @@ fun SettingsTabContent(
                                 label = { Text("SOCKS5") },
                                 enabled = !tunnelRunning,
                                 modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN) {
+                            Text(
+                                "Требует сервер, собранный с -listen-raw. Несовместим со старыми " +
+                                    "серверами — если Raw не подключается, используйте режим WG.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            OutlinedTextField(
+                                value = serverRawPortInput,
+                                onValueChange = { value ->
+                                    if (value.all { it.isDigit() } && value.length <= 5) {
+                                        serverRawPortInput = value
+                                        value.toIntOrNull()?.let { port ->
+                                            scope.launch { settingsStore.saveServerRawPort(port) }
+                                        }
+                                    }
+                                },
+                                label = { Text("Порт сервера (-listen-raw)") },
+                                singleLine = true,
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
                             )
                         }
                         if (connectionMode == SettingsStore.CONNECTION_MODE_SOCKS) {
@@ -1221,6 +1310,44 @@ fun SettingsTabContent(
                                 "Смена режима — после отключения туннеля",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // Применимо ко всем режимам — меняет только транспорт до
+                    // TURN-relay (TCP или UDP), сама TURN/RTP-obfs логика не
+                    // меняется. TCP по умолчанию.
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "TURN-транспорт",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = turnTcpEnabled,
+                                onClick = {
+                                    if (!tunnelRunning) {
+                                        scope.launch { settingsStore.saveTurnTcpEnabled(true) }
+                                    }
+                                },
+                                label = { Text("TCP") },
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = !turnTcpEnabled,
+                                onClick = {
+                                    if (!tunnelRunning) {
+                                        scope.launch { settingsStore.saveTurnTcpEnabled(false) }
+                                    }
+                                },
+                                label = { Text("UDP") },
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.weight(1f)
                             )
                         }
                     }
@@ -1745,6 +1872,55 @@ fun SettingsTabContent(
                         )
                     }
                 }
+            }
+
+            // Компактный переключатель режима подключения прямо рядом с кнопкой
+            // "Подключить" — тот же connectionMode, что и подробный блок "Режим
+            // подключения" выше в списке настроек, просто на виду без прокрутки.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = connectionMode == SettingsStore.CONNECTION_MODE_VPN,
+                    onClick = {
+                        if (!tunnelRunning) {
+                            scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_VPN) }
+                        }
+                    },
+                    label = { Text("WG") },
+                    enabled = !tunnelRunning,
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN,
+                    onClick = {
+                        if (!tunnelRunning) {
+                            scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_RAWTUN) }
+                        }
+                    },
+                    label = { Text("Raw") },
+                    enabled = !tunnelRunning,
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = connectionMode == SettingsStore.CONNECTION_MODE_SOCKS,
+                    onClick = {
+                        if (!tunnelRunning) {
+                            scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_SOCKS) }
+                        }
+                    },
+                    label = { Text("SOCKS5") },
+                    enabled = !tunnelRunning,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            if (connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN) {
+                Text(
+                    "Raw несовместим со старыми серверами — если не подключается, используйте WG.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
 
             Row(
@@ -2317,10 +2493,12 @@ fun HashesDialog(
     hash2: String,
     hash3: String,
     hash4: String,
+    hash5: String = "",
+    hash6: String = "",
     captchaMode: String = "auto",
     vkAnonPath: String = "vkcalls",
     goDnsArg: String = "yandex",
-    onSave: (String, String, String, String) -> Unit,
+    onSave: (String, String, String, String, String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -2329,14 +2507,16 @@ fun HashesDialog(
     var h2 by remember { mutableStateOf(hash2) }
     var h3 by remember { mutableStateOf(hash3) }
     var h4 by remember { mutableStateOf(hash4) }
+    var h5 by remember { mutableStateOf(hash5) }
+    var h6 by remember { mutableStateOf(hash6) }
     var isChecking by remember { mutableStateOf(false) }
     var isGenerating by remember { mutableStateOf(false) }
     var checkJob by remember { mutableStateOf<Job?>(null) }
     var checkResults by remember { mutableStateOf<Map<Int, com.wdtt.client.HashCheckResult>>(emptyMap()) }
     var menuExpanded by remember { mutableStateOf(false) }
 
-    val currentHashes = remember(h1, h2, h3, h4) {
-        listOf(h1, h2, h3, h4).map { stripVkUrlStatic(it) }
+    val currentHashes = remember(h1, h2, h3, h4, h5, h6) {
+        listOf(h1, h2, h3, h4, h5, h6).map { stripVkUrlStatic(it) }
     }
     val filledHashes = remember(currentHashes) {
         currentHashes.filter { it.isNotBlank() }
@@ -2379,7 +2559,7 @@ fun HashesDialog(
                 }
                 result.fold(
                     onSuccess = { newHashes ->
-                        val slots = mutableListOf(h1, h2, h3, h4)
+                        val slots = mutableListOf(h1, h2, h3, h4, h5, h6)
                         newHashes.forEach { hash ->
                             val idx = slots.indexOfFirst { it.isBlank() }
                             if (idx >= 0) slots[idx] = hash
@@ -2388,6 +2568,8 @@ fun HashesDialog(
                         h2 = slots[1]
                         h3 = slots[2]
                         h4 = slots[3]
+                        h5 = slots[4]
+                        h6 = slots[5]
                         Toast.makeText(
                             context,
                             "Создано хешей: ${newHashes.size}",
@@ -2628,7 +2810,7 @@ fun HashesDialog(
                         Triple("2", h2) { v: String -> h2 = v },
                         Triple("3", h3) { v: String -> h3 = v },
                         Triple("4", h4) { v: String -> h4 = v }
-                    ).forEachIndexed { idx, (label, value, onChange) ->
+                    ).take(SettingsStore.MAX_VK_HASHES).forEachIndexed { idx, (label, value, onChange) ->
                         HashSlotCard(
                             slot = idx + 1,
                             label = label,
@@ -2690,7 +2872,7 @@ fun HashesDialog(
                     Button(
                         onClick = {
                             cancelHashCheck(updateUi = false)
-                            onSave(h1, h2, h3, h4)
+                            onSave(h1, h2, h3, h4, h5, h6)
                         },
                         modifier = Modifier.weight(1f).height(44.dp),
                         shape = RoundedCornerShape(12.dp),

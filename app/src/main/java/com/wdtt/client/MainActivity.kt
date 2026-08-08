@@ -68,7 +68,7 @@ import com.wdtt.client.ui.SupportNoticeDialog
 import com.wdtt.client.ui.ProfilesTab
 import com.wdtt.client.ui.LogsTab
 import com.wdtt.client.ui.SettingsTab
-import com.wdtt.client.ui.DeployTab
+import com.wdtt.client.ui.ServersTab
 import com.wdtt.client.ui.ExceptionsTab
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -260,7 +260,7 @@ private data class NavItem(
 
 private val navItems = listOf(
     NavItem(0, "Туннель", Icons.Filled.VpnKey, Icons.Outlined.VpnKey),
-    NavItem(1, "Деплой", Icons.Filled.Cloud, Icons.Outlined.Cloud),
+    NavItem(1, "Серверы", Icons.Filled.Cloud, Icons.Outlined.Cloud),
     NavItem(2, "Профили", Icons.Filled.FolderOpen, Icons.Outlined.Folder),
     NavItem(3, "Обход", Icons.Filled.FilterList, Icons.Outlined.FilterList),
     NavItem(4, "Логи", Icons.Filled.Terminal, Icons.Outlined.Terminal),
@@ -439,7 +439,6 @@ fun MainScreen(
             )
 
             if (hasUpdate && !isPostponed) {
-                settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
                 pendingRelease = release
             }
         }
@@ -530,7 +529,7 @@ fun MainScreen(
                             onConnectRequested = { pendingSwitchToLogs = true },
                             onOpenProfiles = { selectedTab = 2 },
                         )
-                        1 -> DeployTab()
+                        1 -> ServersTab()
                         2 -> ProfilesTab(
                             onProfileApplied = { selectedTab = 0 },
                             importFileUri = MainActivity.pendingFileUri.value,
@@ -683,21 +682,11 @@ fun MainScreen(
                         version = release.versionTag,
                         until = now + 24L * 60L * 60L * 1000L
                     )
-                    settingsStore.saveUpdateDialogAction(
-                        version = release.versionTag,
-                        action = UPDATE_DIALOG_ACTION_POSTPONED,
-                        actedAt = now
-                    )
                 }
             },
             onUpdate = {
                 pendingRelease = null
                 scope.launch {
-                    settingsStore.saveUpdateDialogAction(
-                        version = release.versionTag,
-                        action = UPDATE_DIALOG_ACTION_UPDATE,
-                        actedAt = System.currentTimeMillis()
-                    )
                     openReleaseUrl(context, release.releaseUrl)
                 }
             }
@@ -739,9 +728,9 @@ private fun ProxyNavigationBar(
         colors.outline.copy(alpha = 0.16f)
     }
     val indicatorColor = if (isDark) {
-        colors.primaryContainer.copy(alpha = 0.84f)
+        colors.primary.copy(alpha = 0.22f)
     } else {
-        lerp(colors.primaryContainer, colors.surface, 0.18f).copy(alpha = 0.97f)
+        lerp(colors.primaryContainer, colors.surface, 0.12f).copy(alpha = 0.97f)
     }
     val indicatorIndex = remember { Animatable(0f) }
     val selectedVisualIndex = navItems.indexOfFirst { it.id == selectedTab }.coerceAtLeast(0)
@@ -819,7 +808,8 @@ private fun ProxyNavigationBar(
                         ) {
                             Box(contentAlignment = Alignment.TopEnd) {
                                 Icon(
-                                    imageVector = if (emphasis > 0.55f) item.selectedIcon else item.unselectedIcon,
+                                    // Плоские outlined-иконки; активная вкладка — через цветной контейнер.
+                                    imageVector = item.unselectedIcon,
                                     contentDescription = item.label,
                                     modifier = Modifier.size(22.dp),
                                     tint = iconColor

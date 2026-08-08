@@ -11,10 +11,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -37,6 +40,8 @@ import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import com.wdtt.client.DeployManager
+import com.wdtt.client.ManagedServer
+import com.wdtt.client.ServersStore
 import com.wdtt.client.SettingsStore
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.WDTTColors
@@ -50,14 +55,34 @@ import java.util.Properties
 
 private const val CMD_TIMEOUT = 900000L // 15 minutes
 
+/**
+ * Экран деплоя для ОДНОГО сервера — встраивается в ServersTab как
+ * ServerDeploy(serverId). initialServerId == null означает "новый сервер":
+ * форма стартует пустой (либо с легаси-полями SettingsStore, пока список
+ * ServersStore пуст), а после первого успешного "Сохранить как сервер"
+ * получает свой id. initialServerId != null сразу подгружает поля этого
+ * сервера в форму (см. LaunchedEffect(initialServerId, savedServers) ниже).
+ * Мульти-деплой на несколько серверов сюда не входит — он живёт на
+ * ServerListScreen (ServersTab.kt) через отдельный performMultiDeploy().
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeployTab() {
+fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settingsStore = remember { SettingsStore(context) }
+    val serversStore = remember { ServersStore(context) }
 
     LaunchedEffect(Unit) { DeployManager.init(context) }
+    LaunchedEffect(Unit) { serversStore.migrateLegacyServerIfNeeded() }
+
+    val savedServers by serversStore.servers.collectAsStateWithLifecycle(initialValue = emptyList())
+    // Текущий редактируемый сервер из списка (null = «новый сервер», данные
+    // формы ниже берутся из старых одиночных SettingsStore.deploy* полей —
+    // сохраняет обратную совместимость, пока список пуст/ещё не мигрировал).
+    var selectedServerId by rememberSaveable { mutableStateOf(initialServerId) }
+    var loadedInitialServer by rememberSaveable { mutableStateOf(false) }
+    var showServerNameDialog by remember { mutableStateOf(false) }
 
     val savedIp by settingsStore.deployIp.collectAsStateWithLifecycle(initialValue = "")
     val savedLogin by settingsStore.deployLogin.collectAsStateWithLifecycle(initialValue = "")
@@ -77,17 +102,48 @@ fun DeployTab() {
     var dns1 by remember { mutableStateOf("1.1.1.1") }
     var dns2 by remember { mutableStateOf("1.0.0.1") }
 
-    val savedMainPass by settingsStore.deployMainPassword.collectAsStateWithLifecycle(initialValue = "")
-    val savedAdminId by settingsStore.deployAdminId.collectAsStateWithLifecycle(initialValue = "")
-    val savedBotToken by settingsStore.deployBotToken.collectAsStateWithLifecycle(initialValue = "")
-    val savedSshPort by settingsStore.deploySshPort.collectAsStateWithLifecycle(initialValue = "22")
-    val savedManualPorts by settingsStore.manualPortsEnabled.collectAsStateWithLifecycle(initialValue = false)
-    val savedServerDtlsPort by settingsStore.serverDtlsPort.collectAsStateWithLifecycle(initialValue = 56000)
-    val savedServerWgPort by settingsStore.serverWgPort.collectAsStateWithLifecycle(initialValue = 56001)
+    val flowMainPass by settingsStore.deployMainPassword.collectAsStateWithLifecycle(initialValue = "")
+    val flowAdminId by settingsStore.deployAdminId.collectAsStateWithLifecycle(initialValue = "")
+    val flowBotToken by settingsStore.deployBotToken.collectAsStateWithLifecycle(initialValue = "")
+    val flowSshPort by settingsStore.deploySshPort.collectAsStateWithLifecycle(initialValue = "22")
+    val flowManualPorts by settingsStore.manualPortsEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val flowServerDtlsPort by settingsStore.serverDtlsPort.collectAsStateWithLifecycle(initialValue = 56000)
+    val flowServerWgPort by settingsStore.serverWgPort.collectAsStateWithLifecycle(initialValue = 56001)
+    val savedServerDirectPort by settingsStore.serverDirectPort.collectAsStateWithLifecycle(initialValue = 56002)
+    val savedServerRawPort by settingsStore.serverRawPort.collectAsStateWithLifecycle(initialValue = 56003)
+
+    // Локальный (не Flow) state для полей "секретов" формы — как ip/login/
+    // password выше. Раньше currentFormAsServer/автосохранение читали эти
+    // значения напрямую из settingsStore.*.collectAsStateWithLifecycle(...)
+    // (savedMainPass и т.п.), а loadServerIntoForm() пишет их в SettingsStore
+    // АСИНХРОННО (внутри scope.launch) — из-за этого при открытии деплоя уже
+    // существующего сервера возникало окно, где ip/login уже обновились
+    // синхронно, а savedMainPass ещё содержал значение ПРЕДЫДУЩЕГО открытого
+    // сервера (или пустое) — и автосохранение успевало записать это неверное
+    // значение обратно в ManagedServer, затирая настоящий adminPassword.
+    // Теперь эти поля — обычный component state, обновляемый синхронно в
+    // loadServerIntoForm(), как и остальные поля формы.
+    var mainPass by remember { mutableStateOf("") }
+    var adminId by remember { mutableStateOf("") }
+    var botToken by remember { mutableStateOf("") }
+    var sshPort by remember { mutableStateOf("22") }
+    var manualPorts by remember { mutableStateOf(false) }
+    var serverDtlsPort by remember { mutableIntStateOf(56000) }
+    var serverWgPort by remember { mutableIntStateOf(56001) }
+
+    // Легаси-фолбэк: пока список серверов пуст и форма ещё ни разу не
+    // загружала конкретный ManagedServer (новый сервер с нуля) — подхватываем
+    // значения из старых одиночных SettingsStore.deploy* полей, как раньше.
+    LaunchedEffect(flowMainPass) { if (selectedServerId == null && flowMainPass.isNotEmpty()) mainPass = flowMainPass }
+    LaunchedEffect(flowAdminId) { if (selectedServerId == null && flowAdminId.isNotEmpty()) adminId = flowAdminId }
+    LaunchedEffect(flowBotToken) { if (selectedServerId == null && flowBotToken.isNotEmpty()) botToken = flowBotToken }
+    LaunchedEffect(flowSshPort) { if (selectedServerId == null) sshPort = flowSshPort }
+    LaunchedEffect(flowManualPorts) { if (selectedServerId == null) manualPorts = flowManualPorts }
+    LaunchedEffect(flowServerDtlsPort) { if (selectedServerId == null) serverDtlsPort = flowServerDtlsPort }
+    LaunchedEffect(flowServerWgPort) { if (selectedServerId == null) serverWgPort = flowServerWgPort }
 
     var showSecretsDialog by remember { mutableStateOf(false) }
     var showUninstallDialog by remember { mutableStateOf(false) }
-
     var showSuccessBanner by rememberSaveable { mutableStateOf(false) }
     var successCountdown by rememberSaveable { mutableIntStateOf(5) }
 
@@ -124,12 +180,72 @@ fun DeployTab() {
                 ip = ip,
                 login = login,
                 pass = password,
-                sshPort = savedSshPort,
+                sshPort = sshPort,
                 dns1 = dns1,
                 dns2 = dns2,
                 useSshKey = sshUseKey,
                 keyPassphrase = sshKeyPassphrase,
             )
+        }
+    }
+
+    // Собрать текущее состояние формы в ManagedServer (для сохранения в список
+    // серверов) — использует то же имя, что уже есть у сервера, либо IP как
+    // имя по умолчанию для нового.
+    fun currentFormAsServer(id: String?, name: String): ManagedServer = ManagedServer(
+        id = id ?: "",
+        name = name,
+        ip = ip,
+        sshLogin = login,
+        sshPassword = password,
+        sshUseKey = sshUseKey,
+        sshPrivateKey = savedSshPrivateKey,
+        sshKeyPassphrase = sshKeyPassphrase,
+        sshKeyName = savedSshKeyName,
+        sshPort = sshPort,
+        dns1 = dns1,
+        dns2 = dns2,
+        adminPassword = mainPass,
+        dtlsPort = serverDtlsPort,
+        wgPort = serverWgPort,
+        manualPortsEnabled = manualPorts,
+    )
+
+    fun loadServerIntoForm(server: ManagedServer) {
+        // Всё синхронно — включая "секретные" поля (adminPassword/порты),
+        // которые раньше уходили только в SettingsStore асинхронно и на кадр
+        // отставали от ip/login, вызывая гонку с автосохранением (см.
+        // комментарий у объявления mainPass/adminId/... выше).
+        selectedServerId = server.id
+        ip = server.ip
+        login = server.sshLogin
+        password = server.sshPassword
+        sshUseKey = server.sshUseKey
+        sshKeyPassphrase = server.sshKeyPassphrase
+        dns1 = server.dns1
+        dns2 = server.dns2
+        mainPass = server.adminPassword
+        sshPort = server.sshPort
+        manualPorts = server.manualPortsEnabled
+        serverDtlsPort = server.dtlsPort
+        serverWgPort = server.wgPort
+        scope.launch {
+            settingsStore.saveDeploy(
+                ip = server.ip,
+                login = server.sshLogin,
+                pass = server.sshPassword,
+                sshPort = server.sshPort,
+                dns1 = server.dns1,
+                dns2 = server.dns2,
+                useSshKey = server.sshUseKey,
+                keyPassphrase = server.sshKeyPassphrase,
+            )
+            if (server.sshPrivateKey.isNotBlank()) {
+                settingsStore.saveDeploySshPrivateKey(server.sshPrivateKey, server.sshKeyName)
+            }
+            settingsStore.saveDeploySecrets(server.adminPassword, adminId, botToken, server.sshPort)
+            settingsStore.saveManualPortsEnabled(server.manualPortsEnabled)
+            settingsStore.savePorts(server.dtlsPort, server.wgPort, settingsStore.listenPort.first())
         }
     }
 
@@ -182,6 +298,44 @@ fun DeployTab() {
 
     val scrollState = rememberScrollState()
 
+    // Автозагрузка полей формы для указанного сервера при первом появлении
+    // экрана (переход из ServerListScreen с конкретным serverId). Ждём, пока
+    // savedServers действительно содержит нужный сервер (Flow из DataStore
+    // может дойти на кадр позже первого композирования), и грузим только один
+    // раз, чтобы не затирать правки пользователя при последующих рекомпозициях.
+    LaunchedEffect(initialServerId, savedServers) {
+        if (!loadedInitialServer && initialServerId != null) {
+            val match = savedServers.find { it.id == initialServerId }
+            if (match != null) {
+                loadServerIntoForm(match)
+                loadedInitialServer = true
+            }
+        }
+    }
+
+    // Автосохранение изменений формы обратно в ServersStore — но только для
+    // УЖЕ существующего сервера (selectedServerId != null), и только после
+    // того как loadServerIntoForm() отработал (иначе загрузка сама вызвала
+    // бы немедленную перезапись тем же значением — не проблема сама по себе,
+    // но лишний DataStore.edit на каждое поле при открытии экрана). Раньше
+    // поля вроде "Пароль владельца" (DeploySecretsDialog) писались только в
+    // legacy SettingsStore.deploy* и никогда не попадали в ManagedServer,
+    // если пользователь не нажимал отдельную кнопку "Сохранить как сервер" —
+    // из-за этого сервер выглядел заполненным в списке (по ip/имени), но
+    // "Доступы" считали adminPassword пустым. Теперь любое изменение любого
+    // поля формы для существующего сервера сразу отражается в списке.
+    LaunchedEffect(
+        selectedServerId, loadedInitialServer,
+        ip, login, password, sshUseKey, sshKeyPassphrase, dns1, dns2,
+        mainPass, manualPorts, serverDtlsPort, serverWgPort, sshPort,
+    ) {
+        val id = selectedServerId
+        if (id != null && loadedInitialServer) {
+            val existingName = savedServers.find { it.id == id }?.name ?: ip
+            serversStore.updateServer(currentFormAsServer(id, existingName))
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -189,11 +343,34 @@ fun DeployTab() {
             .padding(bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            "Настройки сервера",
-            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack, enabled = !isDeploying) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Назад",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                "Настройки сервера",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(
+                onClick = { showServerNameDialog = true },
+                enabled = !isDeploying && ip.isNotBlank()
+            ) {
+                Icon(
+                    Icons.Default.Save,
+                    contentDescription = "Сохранить",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
 
         if (isDeploying) {
             AppSectionCard(
@@ -253,7 +430,7 @@ fun DeployTab() {
             }
         }
 
-        val deploySecretsMissing = savedMainPass.isBlank()
+        val deploySecretsMissing = mainPass.isBlank()
         OutlinedButton(
             onClick = { showSecretsDialog = true },
             modifier = Modifier.fillMaxWidth().height(48.dp),
@@ -271,9 +448,9 @@ fun DeployTab() {
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 when {
-                    deploySecretsMissing && savedManualPorts -> "Секреты — укажите пароль WDTT, порты"
+                    deploySecretsMissing && manualPorts -> "Секреты — укажите пароль WDTT, порты"
                     deploySecretsMissing -> "Секреты — нужен пароль WDTT"
-                    savedManualPorts -> "Секреты (BOT, Пароли, Порты)"
+                    manualPorts -> "Секреты (BOT, Пароли, Порты)"
                     else -> "Секреты (BOT, Пароли)"
                 },
                 fontWeight = FontWeight.SemiBold
@@ -286,10 +463,17 @@ fun DeployTab() {
         ) {
             Button(
                 onClick = {
-                    if (ip.isBlank() || !hasSshCredentials || savedMainPass.isBlank()) return@Button
+                    if (ip.isBlank() || !hasSshCredentials || mainPass.isBlank()) return@Button
                     val effectiveLogin = if (login.isBlank()) "root" else login
-                    val effectiveDtlsPort = if (savedManualPorts) savedServerDtlsPort.coerceIn(1, 65535) else 56000
-                    val effectiveWgPort = if (savedManualPorts) savedServerWgPort.coerceIn(1, 65535) else 56001
+                    val effectiveDtlsPort = if (manualPorts) serverDtlsPort.coerceIn(1, 65535) else 56000
+                    val effectiveWgPort = if (manualPorts) serverWgPort.coerceIn(1, 65535) else 56001
+                    // Direct/Raw включаются на сервере ВСЕГДА, а не только когда совпадают с
+                    // режимом, выбранным сейчас на этом телефоне — иначе один деплой гасит
+                    // порт другого транспорта, и переключение клиента между режимами требует
+                    // повторного деплоя. DTLS/WG уже так работают (см. effectiveDtlsPort/
+                    // effectiveWgPort выше — они не завязаны на connectionMode).
+                    val effectiveDirectPort = savedServerDirectPort.coerceIn(1, 65535)
+                    val effectiveRawPort = savedServerRawPort.coerceIn(1, 65535)
                     val appContext = context.applicationContext
                     val sshAuth = buildSshAuth(
                         useKey = sshUseKey,
@@ -308,13 +492,15 @@ fun DeployTab() {
                                 context = appContext,
                                 host = ip,
                                 user = effectiveLogin,
-                                port = savedSshPort.toIntOrNull() ?: 22,
+                                port = sshPort.toIntOrNull() ?: 22,
                                 sshAuth = sshAuth,
-                                mainPass = savedMainPass,
-                                adminId = savedAdminId,
-                                botToken = savedBotToken,
+                                mainPass = mainPass,
+                                adminId = adminId,
+                                botToken = botToken,
                                 dtlsPort = effectiveDtlsPort,
                                 wgPort = effectiveWgPort,
+                                directPort = effectiveDirectPort,
+                                rawPort = effectiveRawPort,
                                 dns1 = dns1,
                                 dns2 = dns2,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
@@ -331,7 +517,7 @@ fun DeployTab() {
                 modifier = Modifier.weight(1f).height(50.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
-                enabled = !isDeploying && ip.isNotBlank() && hasSshCredentials && savedMainPass.isNotBlank()
+                enabled = !isDeploying && ip.isNotBlank() && hasSshCredentials && mainPass.isNotBlank()
             ) {
                 if (isDeploying) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
@@ -636,7 +822,7 @@ fun DeployTab() {
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Switch(
-                    checked = savedManualPorts,
+                    checked = manualPorts,
                     enabled = !isDeploying,
                     onCheckedChange = { enabled ->
                         scope.launch { settingsStore.saveManualPortsEnabled(enabled) }
@@ -644,19 +830,27 @@ fun DeployTab() {
                 )
             }
         }
+
         }
 
         if (showSecretsDialog) {
             DeploySecretsDialog(
                 settingsStore = settingsStore,
-                initialMainPass = savedMainPass,
-                initialAdminId = savedAdminId,
-                initialBotToken = savedBotToken,
-                initialSshPort = savedSshPort,
-                manualPortsEnabled = savedManualPorts,
-                initialServerDtlsPort = savedServerDtlsPort.toString(),
-                initialServerWgPort = savedServerWgPort.toString(),
-                onSaved = { _, _ -> },
+                initialMainPass = mainPass,
+                initialAdminId = adminId,
+                initialBotToken = botToken,
+                initialSshPort = sshPort,
+                manualPortsEnabled = manualPorts,
+                initialServerDtlsPort = serverDtlsPort.toString(),
+                initialServerWgPort = serverWgPort.toString(),
+                onSaved = { newMainPass, newAdminId, newBotToken, newSshPort, newDtlsPort, newWgPort ->
+                    mainPass = newMainPass
+                    adminId = newAdminId
+                    botToken = newBotToken
+                    sshPort = newSshPort
+                    serverDtlsPort = newDtlsPort.toIntOrNull() ?: serverDtlsPort
+                    serverWgPort = newWgPort.toIntOrNull() ?: serverWgPort
+                },
                 onDismiss = { showSecretsDialog = false }
             )
         }
@@ -667,8 +861,8 @@ fun DeployTab() {
                 onConfirm = {
                     showUninstallDialog = false
                     val effectiveLogin = if (login.isBlank()) "root" else login
-                    val effectiveDtlsPort = if (savedManualPorts) savedServerDtlsPort.coerceIn(1, 65535) else 56000
-                    val effectiveWgPort = if (savedManualPorts) savedServerWgPort.coerceIn(1, 65535) else 56001
+                    val effectiveDtlsPort = if (manualPorts) serverDtlsPort.coerceIn(1, 65535) else 56000
+                    val effectiveWgPort = if (manualPorts) serverWgPort.coerceIn(1, 65535) else 56001
                     val sshAuth = buildSshAuth(
                         useKey = sshUseKey,
                         password = password,
@@ -681,7 +875,7 @@ fun DeployTab() {
                             performUninstall(
                                 host = ip,
                                 user = effectiveLogin,
-                                port = savedSshPort.toIntOrNull() ?: 22,
+                                port = sshPort.toIntOrNull() ?: 22,
                                 sshAuth = sshAuth,
                                 dtlsPort = effectiveDtlsPort,
                                 wgPort = effectiveWgPort,
@@ -691,6 +885,196 @@ fun DeployTab() {
                     }
                 }
             )
+        }
+
+        if (showServerNameDialog) {
+            SaveServerNameDialog(
+                initialName = savedServers.find { it.id == selectedServerId }?.name ?: ip,
+                onDismiss = { showServerNameDialog = false },
+                onConfirm = { name ->
+                    showServerNameDialog = false
+                    scope.launch {
+                        val idToSave = selectedServerId
+                        val saved = if (idToSave != null) {
+                            serversStore.updateServer(currentFormAsServer(idToSave, name))
+                            currentFormAsServer(idToSave, name)
+                        } else {
+                            serversStore.addServer(currentFormAsServer(null, name))
+                        }
+                        selectedServerId = saved.id
+                        Toast.makeText(context, "Сервер «$name» сохранён", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+        }
+
+    }
+}
+
+internal sealed class DeployOutcome {
+    object InProgress : DeployOutcome()
+    object Success : DeployOutcome()
+    data class Failed(val message: String) : DeployOutcome()
+}
+
+/**
+ * showLiveProgress — true для сервера, который прямо сейчас разворачивается
+ * (см. activeDeployingServerId в ServersTab.kt): вместо голого спиннера
+ * показывает тот же детальный прогресс (шаг + % + полоса), что и на экране
+ * одиночного деплоя, читая общий DeployManager.deployProgress/currentStep —
+ * они относятся к текущему серверу, потому что мультидеплой строго
+ * последовательный (см. performMultiDeploy).
+ */
+@Composable
+internal fun MultiDeployStatusRow(name: String, outcome: DeployOutcome, showLiveProgress: Boolean = false) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            when (outcome) {
+                is DeployOutcome.InProgress -> CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                is DeployOutcome.Success -> Icon(Icons.Default.CheckCircle, contentDescription = null, tint = WDTTColors.connected, modifier = Modifier.size(16.dp))
+                is DeployOutcome.Failed -> Icon(Icons.Default.Error, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
+            }
+            Text(
+                name,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (outcome is DeployOutcome.Failed) {
+                Text(
+                    outcome.message,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else if (outcome is DeployOutcome.InProgress && showLiveProgress) {
+                val progress by DeployManager.deployProgress.collectAsStateWithLifecycle()
+                Text(
+                    "${(progress * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (outcome is DeployOutcome.InProgress && showLiveProgress) {
+            val progress by DeployManager.deployProgress.collectAsStateWithLifecycle()
+            val step by DeployManager.currentStep.collectAsStateWithLifecycle()
+            val animatedProgress by animateFloatAsState(
+                targetValue = progress,
+                animationSpec = tween(durationMillis = 400, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                label = "multi_deploy_progress",
+            )
+            Text(
+                step,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            LinearProgressIndicator(
+                progress = { animatedProgress },
+                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun SaveServerNameDialog(
+    initialName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by rememberSaveable { mutableStateOf(initialName) }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            tonalElevation = 8.dp
+        ) {
+            Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("Название сервера", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Например, Frankfurt #1") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).height(48.dp), shape = RoundedCornerShape(16.dp)) {
+                        Text("Отмена")
+                    }
+                    Button(
+                        onClick = { onConfirm(name.trim().ifBlank { initialName }) },
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
+                    ) { Text("Сохранить") }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun MultiDeployConfirmDialog(
+    servers: List<ManagedServer>,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            tonalElevation = 8.dp
+        ) {
+            Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("Деплой на несколько серверов", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "Установка будет выполнена по очереди на:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    servers.forEach { server ->
+                        Text(
+                            "• ${server.name.ifBlank { server.ip }} (${server.ip})",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).height(48.dp), shape = RoundedCornerShape(16.dp)) {
+                        Text("Отмена")
+                    }
+                    Button(
+                        onClick = onConfirm,
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
+                    ) {
+                        Icon(Icons.Default.CloudUpload, null, Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Начать")
+                    }
+                }
+            }
         }
     }
 }
@@ -894,7 +1278,7 @@ private suspend fun performDeploy(
     host: String, user: String, port: Int,
     sshAuth: SshAuth,
     mainPass: String, adminId: String, botToken: String,
-    dtlsPort: Int, wgPort: Int, dns1: String, dns2: String,
+    dtlsPort: Int, wgPort: Int, directPort: Int?, rawPort: Int?, dns1: String, dns2: String,
     onProgress: (Float, String) -> Unit
 ): Boolean = withContext(Dispatchers.IO) {
     var session: Session? = null
@@ -936,8 +1320,10 @@ private suspend fun performDeploy(
         serverFile.delete()
 
         onProgress(0.08f, "Установка...")
+        val directPortEnv = if (directPort != null) "WDTT_DIRECT_PORT=$directPort " else ""
+        val rawPortEnv = if (rawPort != null) "WDTT_RAW_PORT=$rawPort " else ""
         val output = ssh.exec(
-            rootCommand("env WDTT_ARGS=${shellQuote(args)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port bash /tmp/deploy.sh"),
+            rootCommand("env WDTT_ARGS=${shellQuote(args)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port ${directPortEnv}${rawPortEnv}bash /tmp/deploy.sh"),
             timeout = CMD_TIMEOUT
         )
 
@@ -965,6 +1351,69 @@ private suspend fun performDeploy(
     }
 }
 
+
+/**
+ * Деплой по очереди на несколько ManagedServer сразу — та же механика, что
+ * раньше жила прямо в DeployTab() (кнопка "Установить на выбранные"), но
+ * вынесена сюда как самостоятельная suspend-функция, чтобы ServersTab.kt мог
+ * вызвать её со своего экрана списка серверов (режим множественного выбора),
+ * не завязываясь на весь UI DeployTab/DeployScreen. onServerStarted/
+ * onServerFinished — колбэки для обновления статус-строк в вызывающем UI.
+ */
+internal suspend fun performMultiDeploy(
+    context: Context,
+    servers: List<ManagedServer>,
+    onServerStarted: (String) -> Unit,
+    onServerFinished: (String, DeployOutcome) -> Unit,
+) {
+    // direct/raw порты — общие глобальные настройки (SettingsStore), не
+    // per-server поля ManagedServer, тот же источник, что читает одиночный
+    // деплой (см. effectiveDirectPort/effectiveRawPort выше в этом файле).
+    // Раньше здесь жёстко передавались null — это отключало -listen-raw/
+    // -listen-direct на сервере при КАЖДОМ деплое через мультисервер-режим,
+    // из-за чего Raw-режим переставал работать после такого деплоя (порт
+    // просто не поднимался на сервере, хотя TURN/DTLS-уровень отрабатывал
+    // нормально — воркеры регистрировались, но GETCONF_RAW слать было некуда).
+    val settingsStore = SettingsStore(context.applicationContext)
+    val effectiveDirectPort = settingsStore.serverDirectPort.first().coerceIn(1, 65535)
+    val effectiveRawPort = settingsStore.serverRawPort.first().coerceIn(1, 65535)
+
+    for (server in servers) {
+        onServerStarted(server.id)
+        try {
+            DeployManager.startDeploy()
+            val effectiveLogin = server.sshLogin.ifBlank { "root" }
+            val effectiveDtlsPort = if (server.manualPortsEnabled) server.dtlsPort.coerceIn(1, 65535) else 56000
+            val effectiveWgPort = if (server.manualPortsEnabled) server.wgPort.coerceIn(1, 65535) else 56001
+            val sshAuth = buildSshAuth(
+                useKey = server.sshUseKey,
+                password = server.sshPassword,
+                privateKey = server.sshPrivateKey,
+                keyPassphrase = server.sshKeyPassphrase,
+            )
+            val success = performDeploy(
+                context = context,
+                host = server.ip,
+                user = effectiveLogin,
+                port = server.sshPort.toIntOrNull() ?: 22,
+                sshAuth = sshAuth,
+                mainPass = server.adminPassword,
+                adminId = "",
+                botToken = "",
+                dtlsPort = effectiveDtlsPort,
+                wgPort = effectiveWgPort,
+                directPort = effectiveDirectPort,
+                rawPort = effectiveRawPort,
+                dns1 = server.dns1,
+                dns2 = server.dns2,
+                onProgress = { p, s -> DeployManager.updateProgress(p, s) }
+            )
+            onServerFinished(server.id, if (success) DeployOutcome.Success else DeployOutcome.Failed("Ошибка деплоя"))
+        } catch (e: Exception) {
+            onServerFinished(server.id, DeployOutcome.Failed(e.message ?: "Ошибка"))
+        }
+    }
+}
 
 // ==================== Uninstall ====================
 
@@ -1063,7 +1512,7 @@ fun DeploySecretsDialog(
     manualPortsEnabled: Boolean,
     initialServerDtlsPort: String,
     initialServerWgPort: String,
-    onSaved: (String, String) -> Unit,
+    onSaved: (mainPass: String, adminId: String, botToken: String, sshPort: String, dtlsPort: String, wgPort: String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -1205,7 +1654,7 @@ fun DeploySecretsDialog(
                         scope.launch {
                             settingsStore.saveDeploySecrets(passInput, adminIdInput, botTokenInput, finalPort)
                             settingsStore.savePorts(finalDtls.toInt(), finalWg.toInt(), settingsStore.listenPort.first())
-                            onSaved(finalDtls, finalWg)
+                            onSaved(passInput, adminIdInput, botTokenInput, finalPort, finalDtls, finalWg)
                             onDismiss()
                         }
                     },
