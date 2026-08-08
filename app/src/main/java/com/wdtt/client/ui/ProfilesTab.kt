@@ -53,6 +53,7 @@ import java.net.URL
 import java.net.URLEncoder
 import com.wdtt.client.SettingsStore
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import java.util.zip.ZipInputStream
@@ -145,22 +146,33 @@ fun ProfilesTab(
 
     val pingResults = com.wdtt.client.PingHelper.pingResults
     val pingingState = com.wdtt.client.PingHelper.pingingState
+    val pingJobs = remember { mutableMapOf<String, Job>() }
 
     fun pingProfile(profile: ConnectionProfile) {
         if (pingingState[profile.id] == true) return
         pingingState[profile.id] = true
-        scope.launch {
-            // Resolve effective hashes: use global if profile says so
-            val effectiveHashes = if (profile.useGlobalHashes) globalHashes.ifEmpty { profile.vkHashes } else profile.vkHashes
-            val profileWithHashes = profile.copy(vkHashes = effectiveHashes)
-            val result = com.wdtt.client.PingHelper.measurePing(context, profileWithHashes)
-            pingResults[profile.id] = result
-            pingingState[profile.id] = false
+        pingJobs[profile.id] = scope.launch {
+            try {
+                // Resolve effective hashes: use global if profile says so
+                val effectiveHashes = if (profile.useGlobalHashes) globalHashes.ifEmpty { profile.vkHashes } else profile.vkHashes
+                val profileWithHashes = profile.copy(vkHashes = effectiveHashes)
+                val result = com.wdtt.client.PingHelper.measurePing(context, profileWithHashes)
+                pingResults[profile.id] = result
+            } finally {
+                pingingState[profile.id] = false
+                pingJobs.remove(profile.id)
+            }
         }
     }
 
     fun pingAllProfiles(list: List<ConnectionProfile>) {
         list.forEach { pingProfile(it) }
+    }
+
+    fun cancelPings() {
+        pingJobs.values.toList().forEach { it.cancel() }
+        pingJobs.clear()
+        profiles.forEach { pingingState[it.id] = false }
     }
 
     val exportZipLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
@@ -1835,6 +1847,9 @@ fun ProfilesTab(
                         color = MaterialTheme.colorScheme.primary,
                         trackColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
                     )
+                    TextButton(onClick = ::cancelPings) {
+                        Text("Отменить")
+                    }
                 }
             }
         }

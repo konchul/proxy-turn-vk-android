@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.CancellationException
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
@@ -20,6 +21,7 @@ object PingHelper {
      */
     suspend fun measurePing(context: android.content.Context, profile: ConnectionProfile): Long = withContext(Dispatchers.IO) {
         android.util.Log.d("PingHelper", "=== Starting ping for profile: ${profile.id} peer=${profile.peer} ===")
+        var process: Process? = null
         try {
             val binaryPath = context.applicationInfo.nativeLibraryDir + "/libclient.so"
             val binaryFile = java.io.File(binaryPath)
@@ -62,13 +64,14 @@ object PingHelper {
             val env = processBuilder.environment()
             env["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
 
-            val process = processBuilder.start()
+            val pingProcess = processBuilder.start()
+            process = pingProcess
             android.util.Log.d("PingHelper", "Process started, reading output...")
 
             var timeMs = -1L
 
             // Read merged stdout+stderr synchronously (since redirectErrorStream=true)
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val reader = BufferedReader(InputStreamReader(pingProcess.inputStream))
             launch(Dispatchers.IO) {
                 try {
                     reader.forEachLine { line ->
@@ -89,15 +92,15 @@ object PingHelper {
             var exitVal = -1
             try {
                 withTimeout(20000L) { // 20 seconds - enough for VK cred fetch + DTLS handshake
-                    while (process.isAlive) {
+                    while (pingProcess.isAlive) {
                         delay(100)
                     }
                 }
-                exitVal = process.exitValue()
+                exitVal = pingProcess.exitValue()
                 // Give output reader a moment to finish
                 delay(200)
             } catch (e: TimeoutCancellationException) {
-                process.destroyForcibly()
+                pingProcess.destroyForcibly()
                 android.util.Log.e("PingHelper", "Ping process timed out after 20s")
             }
 
@@ -106,8 +109,12 @@ object PingHelper {
             if (timeMs != -1L) {
                 return@withContext timeMs
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("PingHelper", "Exception during ping", e)
+        } finally {
+            process?.takeIf { it.isAlive }?.destroyForcibly()
         }
         return@withContext -1L
     }

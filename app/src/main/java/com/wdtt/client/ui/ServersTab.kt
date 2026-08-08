@@ -2,6 +2,7 @@ package com.wdtt.client.ui
 
 import android.content.Intent
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -85,6 +86,12 @@ fun ServersTab() {
 
     var screen by rememberSaveable(stateSaver = ServersTabScreenSaver) {
         mutableStateOf<ServersTabScreen>(ServersTabScreen.ServerList)
+    }
+
+    // На экранах конкретного сервера системный жест «Назад» должен вернуться
+    // к списку серверов, а не закрыть Activity.
+    BackHandler(enabled = screen !is ServersTabScreen.ServerList) {
+        screen = ServersTabScreen.ServerList
     }
 
     Crossfade(targetState = screen, label = "servers_tab_content") { current ->
