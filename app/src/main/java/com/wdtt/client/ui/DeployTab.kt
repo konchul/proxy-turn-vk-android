@@ -111,7 +111,6 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
     val flowServerWgPort by settingsStore.serverWgPort.collectAsStateWithLifecycle(initialValue = 56001)
     val savedServerDirectPort by settingsStore.serverDirectPort.collectAsStateWithLifecycle(initialValue = 56002)
     val savedServerRawPort by settingsStore.serverRawPort.collectAsStateWithLifecycle(initialValue = 56003)
-    val serverWgPacing by settingsStore.serverWgPacing.collectAsStateWithLifecycle(initialValue = false)
 
     // Локальный (не Flow) state для полей "секретов" формы — как ip/login/
     // password выше. Раньше currentFormAsServer/автосохранение читали эти
@@ -502,7 +501,6 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
                                 wgPort = effectiveWgPort,
                                 directPort = effectiveDirectPort,
                                 rawPort = effectiveRawPort,
-                                wgPacing = serverWgPacing,
                                 dns1 = dns1,
                                 dns2 = dns2,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
@@ -828,26 +826,6 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
                     enabled = !isDeploying,
                     onCheckedChange = { enabled ->
                         scope.launch { settingsStore.saveManualPortsEnabled(enabled) }
-                    }
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "WG пейсинг (тест)",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.weight(1f),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Switch(
-                    checked = serverWgPacing,
-                    enabled = !isDeploying,
-                    onCheckedChange = { enabled ->
-                        scope.launch { settingsStore.saveServerWgPacing(enabled) }
                     }
                 )
             }
@@ -1300,7 +1278,7 @@ private suspend fun performDeploy(
     host: String, user: String, port: Int,
     sshAuth: SshAuth,
     mainPass: String, adminId: String, botToken: String,
-    dtlsPort: Int, wgPort: Int, directPort: Int?, rawPort: Int?, wgPacing: Boolean, dns1: String, dns2: String,
+    dtlsPort: Int, wgPort: Int, directPort: Int?, rawPort: Int?, dns1: String, dns2: String,
     onProgress: (Float, String) -> Unit
 ): Boolean = withContext(Dispatchers.IO) {
     var session: Session? = null
@@ -1315,8 +1293,7 @@ private suspend fun performDeploy(
         val adminArg = if (adminId.isNotBlank()) "-admin \"$adminId\" " else ""
         val botArg = if (botToken.isNotBlank()) "-bot-token \"$botToken\" " else ""
         val dnsArg = "-dns ${if(dns1.isNotBlank()) dns1 else "1.1.1.1"}${if(dns2.isNotBlank()) ",$dns2" else ""} "
-        val wgPacingArg = if (wgPacing) "-wg-pacing " else ""
-        val args = "$passArg$adminArg$botArg$dnsArg$wgPacingArg".trim()
+        val args = "$passArg$adminArg$botArg$dnsArg".trim()
 
         val scriptFile = File(context.cacheDir, "deploy.sh")
         val serverFile = File(context.cacheDir, "server")
@@ -1400,7 +1377,6 @@ internal suspend fun performMultiDeploy(
     val settingsStore = SettingsStore(context.applicationContext)
     val effectiveDirectPort = settingsStore.serverDirectPort.first().coerceIn(1, 65535)
     val effectiveRawPort = settingsStore.serverRawPort.first().coerceIn(1, 65535)
-    val wgPacing = settingsStore.serverWgPacing.first()
 
     for (server in servers) {
         onServerStarted(server.id)
@@ -1428,7 +1404,6 @@ internal suspend fun performMultiDeploy(
                 wgPort = effectiveWgPort,
                 directPort = effectiveDirectPort,
                 rawPort = effectiveRawPort,
-                wgPacing = wgPacing,
                 dns1 = server.dns1,
                 dns2 = server.dns2,
                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }

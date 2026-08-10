@@ -52,7 +52,6 @@ class SettingsStore(context: Context) {
         private val SERVER_DIRECT_PORT = intPreferencesKey("server_direct_port")
         /** Порт сервера для raw-IP режима (на сервере нужен -listen-raw). */
         private val SERVER_RAW_PORT = intPreferencesKey("server_raw_port")
-        private val SERVER_WG_PACING = booleanPreferencesKey("server_wg_pacing")
         /** Соединяться с TURN-relay по TCP вместо UDP (обход UDP-душения на некоторых сетях). */
         private val TURN_TCP_ENABLED = booleanPreferencesKey("turn_tcp_enabled")
         private val SNI = stringPreferencesKey("sni")
@@ -325,7 +324,6 @@ class SettingsStore(context: Context) {
     val noDtlsEnabled: Flow<Boolean> = dataStore.data.map { it[NO_DTLS_ENABLED] ?: false }
     val serverDirectPort: Flow<Int> = dataStore.data.map { it[SERVER_DIRECT_PORT] ?: 56002 }
     val serverRawPort: Flow<Int> = dataStore.data.map { it[SERVER_RAW_PORT] ?: 56003 }
-    val serverWgPacing: Flow<Boolean> = dataStore.data.map { it[SERVER_WG_PACING] ?: false }
     /** TURN-relay по TCP вместо UDP — обход UDP-душения на некоторых сетях (напр. Ростелеком). По умолчанию включено. */
     val turnTcpEnabled: Flow<Boolean> = dataStore.data.map { it[TURN_TCP_ENABLED] ?: true }
     val sni: Flow<String> = dataStore.data.map { it[SNI] ?: "" }
@@ -563,10 +561,6 @@ class SettingsStore(context: Context) {
 
     suspend fun saveServerRawPort(port: Int) {
         dataStore.edit { prefs -> prefs[SERVER_RAW_PORT] = port.coerceIn(1, 65535) }
-    }
-
-    suspend fun saveServerWgPacing(enabled: Boolean) {
-        dataStore.edit { prefs -> prefs[SERVER_WG_PACING] = enabled }
     }
 
     suspend fun saveTurnTcpEnabled(enabled: Boolean) {
