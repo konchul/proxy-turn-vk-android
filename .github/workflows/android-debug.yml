@@ -30,6 +30,9 @@ jobs:
           go-version: '1.26.x'
           cache-dependency-path: go_client/go.sum
 
+      - name: Build Linux server asset
+        run: go build -trimpath -o app/src/main/assets/server .
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 

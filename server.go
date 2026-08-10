@@ -1987,6 +1987,13 @@ func downlinkChunkSizeFor(pktSize int) int {
 // раздаёт пакеты быстрее, чем один relay успевает их вытолкнуть в сеть.
 const downlinkWorkerBuf = 256
 
+// rawDownlinkRate ограничивает одну TURN-аллокацию немного ниже наблюдаемого
+// VK лимита ~260 KiB/s. Пейсер сглаживает bursts, не меняя протокол клиента.
+const (
+	rawDownlinkRate  = 247 * 1024
+	rawDownlinkBurst = 16 * 1024
+)
+
 // downlinkWorker — per-conn writer: раньше downlinkLoop писал в conn.Write
 // синхронно сам, из единственного потока на весь сервер — если один relay
 // подтормаживал, вставал весь downlink всех клиентов сразу. Теперь
@@ -1998,14 +2005,21 @@ type downlinkWorker struct {
 	deviceID string
 	sendCh   chan []byte
 	done     chan struct{}
+	pacer    *pacer
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 func newDownlinkWorker(conn net.Conn, deviceID string) *downlinkWorker {
+	ctx, cancel := context.WithCancel(context.Background())
 	w := &downlinkWorker{
 		conn:     conn,
 		deviceID: deviceID,
 		sendCh:   make(chan []byte, downlinkWorkerBuf),
 		done:     make(chan struct{}),
+		pacer:    newPacer(rawDownlinkRate, rawDownlinkBurst),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	go w.run()
 	return w
@@ -2014,9 +2028,14 @@ func newDownlinkWorker(conn net.Conn, deviceID string) *downlinkWorker {
 func (w *downlinkWorker) run() {
 	defer close(w.done)
 	for pkt := range w.sendCh {
-		if _, err := w.conn.Write(pkt); err == nil {
-			atomic.AddInt64(&totalBytesToClient, int64(len(pkt)))
-			addRawDownlinkBytes(w.deviceID, int64(len(pkt)))
+		// RTP/WRAP добавляет заголовок и AEAD-тег; небольшая поправка нужна,
+		// чтобы ограничивать фактический размер пакета в TURN-реле, а не
+		// только полезный raw IP payload.
+		if err := w.pacer.await(w.ctx, float64(len(pkt)+30)); err == nil {
+			if _, err := w.conn.Write(pkt); err == nil {
+				atomic.AddInt64(&totalBytesToClient, int64(len(pkt)))
+				addRawDownlinkBytes(w.deviceID, int64(len(pkt)))
+			}
 		}
 		putBuf2048(pkt)
 	}
@@ -2037,6 +2056,7 @@ func (w *downlinkWorker) enqueue(pkt []byte) bool {
 }
 
 func (w *downlinkWorker) stop() {
+	w.cancel()
 	close(w.sendCh)
 	<-w.done
 }
