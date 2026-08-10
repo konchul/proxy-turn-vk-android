@@ -2594,6 +2594,7 @@ func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "DTLS адрес")
 	listenDirect := flag.String("listen-direct", "", "адрес для клиентов без DTLS (RTP-obfs AEAD напрямую); пусто = выключено")
 	listenRaw := flag.String("listen-raw", "", "адрес для raw-IP клиентов без WireGuard (свой TUN/NAT); пусто = выключено")
+	wgPacing := flag.Bool("wg-pacing", false, "ограничивать downlink WireGuard на одну TURN-аллокацию")
 	wgPort := flag.Int("wg-port", defaultInternalWGPort, "WireGuard UDP порт")
 	configDir := flag.String("config-dir", "/etc/wdtt", "директория конфигурации")
 	mainPass := flag.String("password", "", "пароль владельца")
@@ -2735,7 +2736,7 @@ func main() {
 					defer wg.Done()
 					c := &directConn{pc: pc, addr: addr}
 					defer c.Close()
-					handleConn(ctx, c, wgEndpoint, wgDev, keys)
+					handleConn(ctx, c, wgEndpoint, wgDev, keys, *wgPacing)
 				}(pc, remoteAddr)
 			}
 		}()
@@ -2800,7 +2801,7 @@ func main() {
 		go func(c net.Conn) {
 			defer wg.Done()
 			defer c.Close()
-			handleConn(ctx, c, wgEndpoint, wgDev, keys)
+			handleConn(ctx, c, wgEndpoint, wgDev, keys, *wgPacing)
 		}(dtlsConn)
 	}
 }
@@ -2840,7 +2841,7 @@ func (c *directConn) SetDeadline(t time.Time) error      { return c.pc.SetDeadli
 func (c *directConn) SetReadDeadline(t time.Time) error  { return c.pc.SetReadDeadline(t) }
 func (c *directConn) SetWriteDeadline(t time.Time) error { return c.pc.SetWriteDeadline(t) }
 
-func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
+func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgDev *device.Device, keys *wgKeys, wgPacing bool) {
 	atomic.AddInt64(&totalConns, 1)
 
 	var connDeviceID string
@@ -3028,6 +3029,10 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 
 	pctx, pcancel := context.WithCancel(ctx)
 	defer pcancel()
+	var downlinkPacer *pacer
+	if wgPacing {
+		downlinkPacer = newPacer(rawDownlinkRate, rawDownlinkBurst)
+	}
 
 	context.AfterFunc(pctx, func() {
 		clientConn.SetDeadline(time.Now())
@@ -3096,6 +3101,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			atomic.AddInt64(&totalBytesToClient, int64(nn))
 			// Учёт трафика теперь происходит через IpcGet()
 
+			if err := downlinkPacer.await(pctx, float64(nn+30)); err != nil {
+				return
+			}
 			if _, err := clientConn.Write((*b)[:nn]); err != nil {
 				return
 			}
