@@ -28,7 +28,9 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-          cache-dependency-path: go_client/go.sum
+          cache-dependency-path: |
+            go.sum
+            go_client/go.sum
 
       - name: Build Linux server asset
         run: go build -trimpath -o app/src/main/assets/server .
