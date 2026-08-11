@@ -32,11 +32,14 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +67,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.ManagedServer
 import com.wdtt.client.ServersStore
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.net.InetSocketAddress
+import java.net.Socket
 
 /**
  * Единая вкладка "Серверы" — список серверов на главном экране, тап по
@@ -77,6 +84,18 @@ private sealed class ServersTabScreen {
     object ServerList : ServersTabScreen()
     data class AccessList(val serverId: String) : ServersTabScreen()
     data class ServerDeploy(val serverId: String?) : ServersTabScreen()
+}
+
+private suspend fun isSshReachable(server: ManagedServer): Boolean = withContext(Dispatchers.IO) {
+    val port = server.sshPort.toIntOrNull() ?: 22
+    try {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(server.ip.trim(), port), 2500)
+        }
+        true
+    } catch (_: Exception) {
+        false
+    }
 }
 
 @Composable
@@ -190,6 +209,21 @@ private fun ServerListScreen(
     var multiDeployJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var deleteTarget by remember { mutableStateOf<ManagedServer?>(null) }
     var renameTarget by remember { mutableStateOf<ManagedServer?>(null) }
+    var serverStates by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var checkingServers by remember { mutableStateOf(false) }
+
+    fun checkServers() {
+        if (checkingServers) return
+        checkingServers = true
+        serverStates = servers.associate { it.id to "checking" }
+        scope.launch {
+            val results = servers.associate { server ->
+                server.id to if (isSshReachable(server)) "online" else "offline"
+            }
+            serverStates = results
+            checkingServers = false
+        }
+    }
 
     fun exitMultiSelect() {
         multiSelectMode = false
@@ -211,6 +245,15 @@ private fun ServerListScreen(
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f)
             )
+            if (servers.isNotEmpty()) {
+                TextButton(onClick = ::checkServers, enabled = !checkingServers) {
+                    if (checkingServers) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("Проверить")
+                    }
+                }
+            }
             if (servers.size > 1) {
                 IconButton(onClick = {
                     if (multiSelectMode) exitMultiSelect() else multiSelectMode = true
@@ -270,6 +313,8 @@ private fun ServerListScreen(
                             onOpenAccess = { onOpenAccess(server.id) },
                             onOpenDeploy = { onOpenDeploy(server.id) },
                             onRenameRequest = {},
+                            onRequestDelete = {},
+                            state = serverStates[server.id] ?: "unknown",
                         )
                     } else {
                         SwipeToDeleteServerCard(
@@ -278,6 +323,7 @@ private fun ServerListScreen(
                             onOpenDeploy = { onOpenDeploy(server.id) },
                             onRequestDelete = { deleteTarget = server },
                             onRenameRequest = { renameTarget = server },
+                            state = serverStates[server.id] ?: "unknown",
                         )
                     }
                 }
@@ -413,6 +459,7 @@ private fun SwipeToDeleteServerCard(
     onOpenDeploy: () -> Unit,
     onRequestDelete: () -> Unit,
     onRenameRequest: () -> Unit,
+    state: String,
 ) {
     val dismissState = rememberDismissState(
         confirmStateChange = { value ->
@@ -453,6 +500,8 @@ private fun SwipeToDeleteServerCard(
             onOpenAccess = onOpenAccess,
             onOpenDeploy = onOpenDeploy,
             onRenameRequest = onRenameRequest,
+            onRequestDelete = onRequestDelete,
+            state = state,
         )
     }
 }
@@ -466,7 +515,10 @@ private fun ServerCard(
     onOpenAccess: () -> Unit,
     onOpenDeploy: () -> Unit,
     onRenameRequest: () -> Unit,
+    onRequestDelete: () -> Unit,
+    state: String,
 ) {
+    var showActions by remember { mutableStateOf(false) }
     AppSectionCard(
         modifier = Modifier.clickable(enabled = !multiSelectMode, onClick = onOpenAccess),
         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp),
@@ -482,13 +534,29 @@ private fun ServerCard(
                 Spacer(modifier = Modifier.width(4.dp))
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    server.name.ifBlank { server.ip },
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        server.name.ifBlank { server.ip },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    val statusText = when (state) {
+                        "online" -> "● Онлайн"
+                        "offline" -> "● Нет связи"
+                        "checking" -> "● Проверка"
+                        else -> "● Не проверен"
+                    }
+                    val statusColor = when (state) {
+                        "online" -> androidx.compose.ui.graphics.Color(0xFF2E7D32)
+                        "offline" -> MaterialTheme.colorScheme.error
+                        "checking" -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Text(statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
+                }
                 if (server.name.isNotBlank() && server.name != server.ip) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
@@ -508,20 +576,37 @@ private fun ServerCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (!multiSelectMode) {
-                IconButton(onClick = onRenameRequest) {
-                    Icon(
-                        Icons.Filled.Edit,
-                        contentDescription = "Переименовать",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+        }
+        if (!multiSelectMode) {
+            Spacer(Modifier.height(10.dp))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = onOpenAccess, modifier = Modifier.weight(1f)) {
+                    Text("Пользователи")
                 }
-                IconButton(onClick = onOpenDeploy) {
-                    Icon(
-                        Icons.Filled.CloudUpload,
-                        contentDescription = "Деплой",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = onOpenDeploy, modifier = Modifier.weight(1f)) {
+                    Text("Установить / обновить")
+                }
+                Box {
+                    IconButton(onClick = { showActions = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "Действия с сервером")
+                    }
+                    DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Переименовать") },
+                            onClick = {
+                                showActions = false
+                                onRenameRequest()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Удалить", color = MaterialTheme.colorScheme.error) },
+                            onClick = {
+                                showActions = false
+                                onRequestDelete()
+                            }
+                        )
+                    }
                 }
             }
         }
