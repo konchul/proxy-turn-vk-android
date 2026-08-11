@@ -147,6 +147,10 @@ fun ProfilesTab(
     val pingResults = com.wdtt.client.PingHelper.pingResults
     val pingingState = com.wdtt.client.PingHelper.pingingState
     val pingJobs = remember { mutableMapOf<String, Job>() }
+    var diagnosticProfile by remember { mutableStateOf<ConnectionProfile?>(null) }
+    var diagnosticSteps by remember { mutableStateOf(emptyList<com.wdtt.client.DiagnosticStep>()) }
+    var diagnosticReport by remember { mutableStateOf<com.wdtt.client.DiagnosticReport?>(null) }
+    var diagnosticJob by remember { mutableStateOf<Job?>(null) }
 
     fun pingProfile(profile: ConnectionProfile) {
         if (pingingState[profile.id] == true) return
@@ -167,6 +171,20 @@ fun ProfilesTab(
 
     fun pingAllProfiles(list: List<ConnectionProfile>) {
         list.forEach { pingProfile(it) }
+    }
+
+    fun diagnoseProfile(profile: ConnectionProfile) {
+        if (diagnosticJob?.isActive == true) return
+        diagnosticProfile = profile
+        diagnosticSteps = emptyList()
+        diagnosticReport = null
+        val effectiveHashes = if (profile.useGlobalHashes) globalHashes.ifEmpty { profile.vkHashes } else profile.vkHashes
+        diagnosticJob = scope.launch {
+            diagnosticReport = com.wdtt.client.ConnectionDiagnostic.run(
+                context,
+                profile.copy(vkHashes = effectiveHashes)
+            ) { steps -> scope.launch { diagnosticSteps = steps } }
+        }
     }
 
     fun cancelPings() {
@@ -1075,6 +1093,59 @@ fun ProfilesTab(
         )
     }
 
+    diagnosticProfile?.let { profile ->
+        AlertDialog(
+            onDismissRequest = {
+                diagnosticJob?.cancel()
+                diagnosticJob = null
+                diagnosticProfile = null
+            },
+            title = { Text("Диагностика: ${profile.name}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (diagnosticSteps.isEmpty() && diagnosticReport == null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(10.dp))
+                            Text("Запуск проверки…")
+                        }
+                    }
+                    diagnosticSteps.forEach { step ->
+                        val mark = when (step.state) {
+                            "ok" -> "✓"
+                            "error" -> "✕"
+                            else -> "…"
+                        }
+                        Text("$mark ${step.message}", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    diagnosticReport?.let { report ->
+                        if (report.rttMs != null) {
+                            Text("✓ DTLS-рукопожатие завершено: ${report.rttMs} мс", color = MaterialTheme.colorScheme.primary)
+                        } else {
+                            Text(
+                                report.error ?: "Проверка не завершилась",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                    Text(
+                        "Если TURN создан, но DTLS не завершён, приложение дошло до сети VK, но не получило ответ от сервера: проверьте адрес, порт и пароль сервера.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    diagnosticJob?.cancel()
+                    diagnosticJob = null
+                    diagnosticProfile = null
+                }) { Text(if (diagnosticReport == null) "Отменить" else "Закрыть") }
+            }
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -1685,6 +1756,23 @@ fun ProfilesTab(
                                             modifier = Modifier.size(16.dp)
                                         )
                                     }
+                                }
+
+                                Spacer(Modifier.width(8.dp))
+
+                                androidx.compose.material3.FilledIconButton(
+                                    onClick = { diagnoseProfile(profile) },
+                                    modifier = Modifier.size(28.dp),
+                                    colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Info,
+                                        contentDescription = "Диагностика TURN и DTLS",
+                                        modifier = Modifier.size(16.dp)
+                                    )
                                 }
 
                                 Spacer(Modifier.width(8.dp))

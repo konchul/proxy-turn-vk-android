@@ -167,6 +167,7 @@ func main() {
 	peerAddr := flag.String("peer", "", "адрес:порт VPS сервера")
 	numW := flag.Int("n", 24, "количество воркеров (кратно 12)")
 	pingOnly := flag.Bool("ping-only", false, "запустить только замер задержки и выйти")
+	diagnose := flag.Bool("diagnose", false, "проверить этапы VK TURN и DTLS и выйти")
 
 	deviceID := flag.String("device-id", "unknown", "уникальный ID устройства")
 	connPassword := flag.String("password", "", "пароль подключения")
@@ -261,32 +262,67 @@ func main() {
 	}
 
 	tp := &TurnParams{
-		Host:     *host,
-		Port:     *port,
-		Hashes:   hashes,
-		WrapKey:  wrapKey,
-		ObfsMode: normalizeObfsMode(*obfsMode),
+		Host:         *host,
+		Port:         *port,
+		Hashes:       hashes,
+		WrapKey:      wrapKey,
+		ObfsMode:     normalizeObfsMode(*obfsMode),
 		NoDTLS:       *noDTLS,
 		RawMode:      activeConnMode == "rawtun",
 		TCPTransport: *turnTCP,
 	}
 
-	if *pingOnly {
+	if *pingOnly || *diagnose {
+		emitDiagnostic := func(stage, state, message string) {
+			if !*diagnose {
+				return
+			}
+			message = strings.ReplaceAll(message, "|", "/")
+			message = strings.ReplaceAll(message, "\n", " ")
+			fmt.Printf("DIAG|%s|%s|%s\n", stage, state, message)
+		}
+		if *diagnose {
+			emitDiagnostic("peer", "ok", peer.String())
+		}
 		var lastErr error
+		lastStage := "vk"
 		for i, hash := range hashes {
+			lastStage = "vk"
+			emitDiagnostic("vk", "running", "Получение временных TURN-данных")
 			user, pass, turnURLs, err := GetCreds(ctx, hash, 999)
 			if err != nil {
 				lastErr = fmt.Errorf("GetCreds hash %d: %v", i, err)
 				continue
 			}
+			emitDiagnostic("vk", "ok", "Временные TURN-данные получены")
 			creds := &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: 999}
-			rtt, err := RunPing(ctx, tp, peer, creds)
+			lastStage = "turn"
+			emitDiagnostic("turn", "running", "Создание TURN-выделения")
+			rtt, err := RunPingWithProgress(ctx, tp, peer, creds, func(stage, state string) {
+				if state == "running" && stage == "dtls" {
+					lastStage = "dtls"
+				}
+				if state == "ok" && stage == "turn" {
+					emitDiagnostic(stage, state, "TURN-выделение создано")
+					return
+				}
+				emitDiagnostic(stage, state, "Проверка DTLS-рукопожатия")
+			})
 			if err != nil {
 				lastErr = fmt.Errorf("RunPing hash %d: %v", i, err)
 				continue
 			}
+			if *diagnose {
+				fmt.Printf("DIAG_RESULT|%d\n", rtt)
+				os.Exit(0)
+			}
 			fmt.Printf("PING_RESULT|%d\n", rtt)
 			os.Exit(0)
+		}
+		if *diagnose {
+			emitDiagnostic(lastStage, "error", fmt.Sprintf("%v", lastErr))
+			fmt.Printf("DIAG_ERROR|%s|%v\n", lastStage, lastErr)
+			os.Exit(1)
 		}
 		// Если все хеши провалились
 		fmt.Printf("PING_ERROR|All hashes failed. Last error: %v\n", lastErr)

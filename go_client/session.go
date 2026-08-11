@@ -26,7 +26,7 @@ const (
 	sessionReadTimeout = 30 * time.Minute // Increased from 60s to 30min
 	readBufSize        = 1600
 	socketBufSize      = 625 * 1024
-	keepaliveByte = 0xFF // keepalive marker (DTLS-level или прямой obfs-кадр)
+	keepaliveByte      = 0xFF // keepalive marker (DTLS-level или прямой obfs-кадр)
 	// keepaliveInterval: 1с (как у референсного клиента) — агрессивнее держит
 	// TURN permission/NAT-маппинг "тёплым" на каждом из 18-108 relay-сокетов
 	// сессии, чем прежние 15с/5с.
@@ -684,6 +684,16 @@ func RunPing(
 	peer *net.UDPAddr,
 	creds *Credentials,
 ) (int64, error) {
+	return RunPingWithProgress(ctx, tp, peer, creds, nil)
+}
+
+func RunPingWithProgress(
+	ctx context.Context,
+	tp *TurnParams,
+	peer *net.UDPAddr,
+	creds *Credentials,
+	progress func(string, string),
+) (int64, error) {
 	startPing := time.Now()
 
 	if len(creds.TurnURLs) == 0 {
@@ -740,6 +750,9 @@ func RunPing(
 		return 0, err
 	}
 	defer relay.Close()
+	if progress != nil {
+		progress("turn", "ok")
+	}
 
 	pipeA, pipeB := connutil.AsyncPacketPipe()
 	defer pipeA.Close()
@@ -826,6 +839,9 @@ func RunPing(
 		return 0, err
 	}
 	defer dtlsConn.Close()
+	if progress != nil {
+		progress("dtls", "running")
+	}
 
 	hctx, hcancel := context.WithTimeout(sessCtx, 15*time.Second)
 	defer hcancel()
@@ -833,6 +849,9 @@ func RunPing(
 	err = dtlsConn.HandshakeContext(hctx)
 	if err != nil {
 		return 0, err
+	}
+	if progress != nil {
+		progress("dtls", "ok")
 	}
 
 	rtt := time.Since(startPing).Milliseconds()
