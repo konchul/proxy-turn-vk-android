@@ -3008,6 +3008,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 
 	pctx, pcancel := context.WithCancel(ctx)
 	defer pcancel()
+	downlinkPacer := newPacer(247*1024, 16*1024)
 
 	context.AfterFunc(pctx, func() {
 		clientConn.SetDeadline(time.Now())
@@ -3076,6 +3077,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			atomic.AddInt64(&totalBytesToClient, int64(nn))
 			// Учёт трафика теперь происходит через IpcGet()
 
+			if err := downlinkPacer.await(pctx, float64(nn+30)); err != nil {
+				return
+			}
 			if _, err := clientConn.Write((*b)[:nn]); err != nil {
 				return
 			}
