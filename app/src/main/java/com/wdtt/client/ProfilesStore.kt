@@ -96,7 +96,7 @@ class ProfilesStore(context: Context) {
                 val name = prefs[nameKey(id)] ?: ""
                 val peer = prefs[peerKey(id)] ?: ""
                 val hashes = prefs[hashesKey(id)] ?: ""
-                val workers = prefs[workersKey(id)] ?: 16
+                val workers = prefs[workersKey(id)] ?: 9
                 val port = prefs[portKey(id)] ?: 9000
                 val enc = prefs[passKey(id)] ?: ""
                 val pass = secureStore.decrypt(enc) ?: ""
@@ -434,7 +434,7 @@ class ProfilesStore(context: Context) {
         val name = prefs[nameKey(id)] ?: return null
         val peer = prefs[peerKey(id)] ?: ""
         val hashes = prefs[hashesKey(id)] ?: ""
-        val workers = prefs[workersKey(id)] ?: 16
+        val workers = prefs[workersKey(id)] ?: 9
         val port = prefs[portKey(id)] ?: 9000
         val enc = prefs[passKey(id)] ?: ""
         val pass = secureStore.decrypt(enc) ?: ""

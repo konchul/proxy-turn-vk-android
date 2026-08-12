@@ -165,7 +165,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:9000", "локальный адрес")
 	vkHash := flag.String("vk", "", "хеши VK-звонков (через запятую)")
 	peerAddr := flag.String("peer", "", "адрес:порт VPS сервера")
-	numW := flag.Int("n", 24, "количество воркеров (кратно 12)")
+	numW := flag.Int("n", 9, "количество воркеров")
 	pingOnly := flag.Bool("ping-only", false, "запустить только замер задержки и выйти")
 
 	deviceID := flag.String("device-id", "unknown", "уникальный ID устройства")
@@ -261,11 +261,11 @@ func main() {
 	}
 
 	tp := &TurnParams{
-		Host:     *host,
-		Port:     *port,
-		Hashes:   hashes,
-		WrapKey:  wrapKey,
-		ObfsMode: normalizeObfsMode(*obfsMode),
+		Host:         *host,
+		Port:         *port,
+		Hashes:       hashes,
+		WrapKey:      wrapKey,
+		ObfsMode:     normalizeObfsMode(*obfsMode),
 		NoDTLS:       *noDTLS,
 		RawMode:      activeConnMode == "rawtun",
 		TCPTransport: *turnTCP,

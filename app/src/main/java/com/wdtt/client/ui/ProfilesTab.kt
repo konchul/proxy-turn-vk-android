@@ -273,7 +273,7 @@ fun ProfilesTab(
                                             val name = obj.optString("name", "Imported")
                                             val peer = obj.optString("peer", "")
                                             val vkHashes = obj.optString("vkHashes", "")
-                                            val workers = obj.optInt("workersPerHash", 16)
+                                            val workers = obj.optInt("workersPerHash", 9)
                                             val port = obj.optInt("listenPort", 9000)
                                             val pass = obj.optString("password", "")
                                             val groupName = obj.optString("groupName", "")
@@ -317,7 +317,7 @@ fun ProfilesTab(
     }
     val currentPeer by settingsStore.peer.collectAsStateWithLifecycle(initialValue = "")
     val currentHashes by settingsStore.vkHashes.collectAsStateWithLifecycle(initialValue = "")
-    val currentWorkers by settingsStore.workersPerHash.collectAsStateWithLifecycle(initialValue = 16)
+    val currentWorkers by settingsStore.workersPerHash.collectAsStateWithLifecycle(initialValue = 9)
     val currentPort by settingsStore.listenPort.collectAsStateWithLifecycle(initialValue = 9000)
     val currentPassword by settingsStore.connectionPassword.collectAsStateWithLifecycle(initialValue = "")
     val currentProfileId by settingsStore.currentProfileId.collectAsStateWithLifecycle(initialValue = "")
@@ -327,7 +327,7 @@ fun ProfilesTab(
     var nameInput by rememberSaveable { mutableStateOf("") }
     var peerInput by rememberSaveable { mutableStateOf("") }
     var hashesInput by rememberSaveable { mutableStateOf("") }
-    var workersInput by rememberSaveable { mutableStateOf("16") }
+    var workersInput by rememberSaveable { mutableStateOf("9") }
     var portInput by rememberSaveable { mutableStateOf("9000") }
     var passwordInput by rememberSaveable { mutableStateOf("") }
     var useGlobalHashesInput by rememberSaveable { mutableStateOf(true) }
@@ -466,7 +466,7 @@ fun ProfilesTab(
         val name = nameInput.trim()
         val peer = peerInput.trim()
         val hashes = hashesInput.trim()
-        val workers = workersInput.toIntOrNull()?.coerceIn(1, 128) ?: 16
+        val workers = workersInput.toIntOrNull()?.coerceIn(1, 128) ?: 9
         val port = portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000
         val password = passwordInput
         
@@ -1023,7 +1023,7 @@ fun ProfilesTab(
                                 "  \"peer\": \"IP_сервера\",\n" +
                                 "  \"password\": \"пароль\",\n" +
                                 "  \"hashes\": \"vk_хеши\",\n" +
-                                "  \"workers\": 16,\n" +
+                                "  \"workers\": 9,\n" +
                                 "  \"port\": 9000\n" +
                                 "}",
                                 style = MaterialTheme.typography.bodySmall,
@@ -2029,7 +2029,7 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
                     name = "WDTT $ip",
                     peer = "$ip:$dtlsPort",
                     vkHashes = hash,
-                    workersPerHash = 16,
+                    workersPerHash = 9,
                     listenPort = localPort,
                     password = pass
                 )

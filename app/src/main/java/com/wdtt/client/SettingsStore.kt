@@ -314,7 +314,7 @@ class SettingsStore(context: Context) {
     val vkHashes: Flow<String> = dataStore.data.map { it[VK_HASHES] ?: "" }
     val globalVkHashes: Flow<String> = appContext.dataStore.data.map { it[GLOBAL_VK_HASHES] ?: "" }
     val secondaryVkHash: Flow<String> = appContext.dataStore.data.map { it[SECONDARY_VK_HASH] ?: "" }
-    val workersPerHash: Flow<Int> = dataStore.data.map { it[WORKERS_PER_HASH] ?: 16 }
+    val workersPerHash: Flow<Int> = dataStore.data.map { it[WORKERS_PER_HASH] ?: 9 }
     val protocol: Flow<String> = dataStore.data.map { it[PROTOCOL] ?: "udp" }
     val listenPort: Flow<Int> = dataStore.data.map { it[LISTEN_PORT] ?: 9000 }
     val manualPortsEnabled: Flow<Boolean> = dataStore.data.map { it[MANUAL_PORTS_ENABLED] ?: false }

@@ -146,7 +146,7 @@ object SubscriptionImport {
         val peer = jsonObj.optString("peer", "")
         if (peer.isBlank()) return null
         val hashes = jsonObj.optString("hashes", jsonObj.optString("vkHashes", ""))
-        val workers = jsonObj.optInt("workers", jsonObj.optInt("workersPerHash", 16))
+        val workers = jsonObj.optInt("workers", jsonObj.optInt("workersPerHash", 9))
         val port = jsonObj.optInt("port", jsonObj.optInt("listenPort", 9000))
         val pass = jsonObj.optString("password", jsonObj.optString("pass", ""))
         val traffic = jsonObj.optDouble("trafficMb", jsonObj.optDouble("trafficUsedMb", 0.0))
@@ -170,7 +170,7 @@ object SubscriptionImport {
             val name = uri.getQueryParameter("name") ?: "QR Профиль"
             val peer = uri.getQueryParameter("peer") ?: return null
             val hashes = uri.getQueryParameter("hashes") ?: ""
-            val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: 18
+            val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: 9
             val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 9000
             val pass = uri.getQueryParameter("pass") ?: uri.getQueryParameter("password") ?: ""
             ConnectionProfile(

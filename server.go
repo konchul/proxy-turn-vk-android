@@ -763,7 +763,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
   "name": "qWDTT - %s",
   "peer": "%s",
   "vkHashes": "%s",
-  "workersPerHash": 16,
+  "workersPerHash": 9,
   "listenPort": 9000,
   "password": "%s"
 }`, srvIP, srvIP, entry.VkHash, pass)
@@ -959,7 +959,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					peerEsc := neturl.QueryEscape(srvIP)
 					hashesEsc := neturl.QueryEscape(hash)
 					passEsc := neturl.QueryEscape(db.MainPassword)
-					qwdttLink := fmt.Sprintf("qwdtt://config?name=%s&peer=%s&hashes=%s&workers=16&port=9000&pass=%s", nameEsc, peerEsc, hashesEsc, passEsc)
+					qwdttLink := fmt.Sprintf("qwdtt://config?name=%s&peer=%s&hashes=%s&workers=9&port=9000&pass=%s", nameEsc, peerEsc, hashesEsc, passEsc)
 
 					msgText := fmt.Sprintf("🔗 *Ссылка для главного пароля:*\n`%s`\n\n🔗 *Быстрая ссылка qWDTT:* `%s`", link, qwdttLink)
 					sendTelegram(token, adminID, msgText, nil)
@@ -968,7 +968,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
   "name": "qWDTT - Main (%s)",
   "peer": "%s",
   "vkHashes": "%s",
-  "workersPerHash": 16,
+  "workersPerHash": 9,
   "listenPort": 9000,
   "password": "%s"
 }`, srvIP, srvIP, hash, db.MainPassword)
@@ -1025,7 +1025,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				peerEsc := neturl.QueryEscape(srvIP)
 				hashesEsc := neturl.QueryEscape(hash)
 				passEsc := neturl.QueryEscape(newPass)
-				qwdttLink := fmt.Sprintf("qwdtt://config?name=%s&peer=%s&hashes=%s&workers=16&port=9000&pass=%s", nameEsc, peerEsc, hashesEsc, passEsc)
+				qwdttLink := fmt.Sprintf("qwdtt://config?name=%s&peer=%s&hashes=%s&workers=9&port=9000&pass=%s", nameEsc, peerEsc, hashesEsc, passEsc)
 
 				msgText := fmt.Sprintf("👤 Имя: *%s*\n🔑 Новый пароль:\n`%s`\n\n⏰ Действует %d дн. (до %s)\n📱 Лимит: %d устройств\nОжидает первого подключения\n\n🔗 *Быстрая ссылка qWDTT:* `%s`\n\n🔗 *Legacy ссылка:* `%s`", newLabel, newPass, tempDays, expDate, tempMaxDevs, qwdttLink, link)
 				sendTelegram(token, adminID, msgText, nil)
@@ -1034,7 +1034,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
   "name": "%s",
   "peer": "%s",
   "vkHashes": "%s",
-  "workersPerHash": 16,
+  "workersPerHash": 9,
   "listenPort": 9000,
   "password": "%s"
 }`, newLabel, srvIP, hash, newPass)
@@ -1386,7 +1386,7 @@ type rawTrafficCounter struct {
 
 var (
 	rawDeviceTrafficMu sync.Mutex
-	rawDeviceTraffic    = make(map[string]*rawTrafficCounter)
+	rawDeviceTraffic   = make(map[string]*rawTrafficCounter)
 )
 
 func addRawUplinkBytes(deviceID string, n int64) {
