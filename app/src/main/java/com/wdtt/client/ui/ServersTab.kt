@@ -32,11 +32,15 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -75,6 +79,7 @@ import kotlinx.coroutines.launch
  */
 private sealed class ServersTabScreen {
     object ServerList : ServersTabScreen()
+    data class ServerOverview(val serverId: String) : ServersTabScreen()
     data class AccessList(val serverId: String) : ServersTabScreen()
     data class ServerDeploy(val serverId: String?) : ServersTabScreen()
 }
@@ -98,18 +103,24 @@ fun ServersTab() {
         when (val s = current) {
             is ServersTabScreen.ServerList -> ServerListScreen(
                 serversStore = serversStore,
-                onOpenAccess = { id -> screen = ServersTabScreen.AccessList(id) },
-                onOpenDeploy = { id -> screen = ServersTabScreen.ServerDeploy(id) },
+                onOpenServer = { id -> screen = ServersTabScreen.ServerOverview(id) },
                 onAddServer = { screen = ServersTabScreen.ServerDeploy(null) },
+            )
+            is ServersTabScreen.ServerOverview -> ServerOverviewHost(
+                serversStore = serversStore,
+                serverId = s.serverId,
+                onOpenAccess = { screen = ServersTabScreen.AccessList(s.serverId) },
+                onOpenDeploy = { screen = ServersTabScreen.ServerDeploy(s.serverId) },
+                onBack = { screen = ServersTabScreen.ServerList },
             )
             is ServersTabScreen.AccessList -> AccessListHost(
                 serversStore = serversStore,
                 serverId = s.serverId,
-                onBack = { screen = ServersTabScreen.ServerList },
+                onBack = { screen = ServersTabScreen.ServerOverview(s.serverId) },
             )
             is ServersTabScreen.ServerDeploy -> DeployScreen(
                 initialServerId = s.serverId,
-                onBack = { screen = ServersTabScreen.ServerList },
+                onBack = { screen = s.serverId?.let { ServersTabScreen.ServerOverview(it) } ?: ServersTabScreen.ServerList },
             )
         }
     }
@@ -124,12 +135,14 @@ private val ServersTabScreenSaver = androidx.compose.runtime.saveable.Saver<Serv
     save = { state ->
         when (state) {
             is ServersTabScreen.ServerList -> listOf("list")
+            is ServersTabScreen.ServerOverview -> listOf("overview", state.serverId)
             is ServersTabScreen.AccessList -> listOf("access", state.serverId)
             is ServersTabScreen.ServerDeploy -> listOf("deploy", state.serverId ?: "")
         }
     },
     restore = { saved ->
         when (saved.getOrNull(0)) {
+            "overview" -> ServersTabScreen.ServerOverview(saved.getOrElse(1) { "" })
             "access" -> ServersTabScreen.AccessList(saved.getOrElse(1) { "" })
             "deploy" -> ServersTabScreen.ServerDeploy(saved.getOrNull(1)?.ifEmpty { null })
             else -> ServersTabScreen.ServerList
@@ -151,6 +164,10 @@ private fun AccessListHost(
 ) {
     val servers by serversStore.servers.collectAsStateWithLifecycle(initialValue = emptyList())
     val server = servers.find { it.id == serverId }
+    val scope = rememberCoroutineScope()
+    var showActions by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showRename by remember { mutableStateOf(false) }
 
     LaunchedEffect(servers, serverId) {
         if (servers.isNotEmpty() && server == null) {
@@ -167,12 +184,156 @@ private fun AccessListHost(
     }
 }
 
+@Composable
+private fun ServerOverviewHost(
+    serversStore: ServersStore,
+    serverId: String,
+    onOpenAccess: () -> Unit,
+    onOpenDeploy: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val servers by serversStore.servers.collectAsStateWithLifecycle(initialValue = emptyList())
+    val server = servers.find { it.id == serverId }
+
+    LaunchedEffect(servers, serverId) {
+        if (servers.isNotEmpty() && server == null) onBack()
+    }
+
+    if (server == null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+    } else {
+        ServerOverviewScreen(
+            server = server,
+            onOpenAccess = onOpenAccess,
+            onOpenDeploy = onOpenDeploy,
+            onBack = onBack,
+            showActions = showActions,
+            onShowActions = { showActions = it },
+            onRename = { showRename = true },
+            onDelete = { showDeleteConfirm = true },
+        )
+        if (showRename) {
+            SaveServerNameDialog(
+                initialName = server.name.ifBlank { server.ip },
+                onDismiss = { showRename = false },
+                onConfirm = { name ->
+                    scope.launch { serversStore.updateServer(server.copy(name = name)) }
+                    showRename = false
+                }
+            )
+        }
+        if (showDeleteConfirm) {
+            AlertDialog(
+                onDismissRequest = { showDeleteConfirm = false },
+                title = { Text("Удалить сервер?") },
+                text = { Text("Из приложения будут удалены только данные подключения. Сервер и созданные на нём доступы останутся без изменений.") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            scope.launch { serversStore.deleteServer(server.id) }
+                            showDeleteConfirm = false
+                            onBack()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) { Text("Удалить") }
+                },
+                dismissButton = { TextButton(onClick = { showDeleteConfirm = false }) { Text("Отмена") } },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ServerOverviewScreen(
+    server: ManagedServer,
+    onOpenAccess: () -> Unit,
+    onOpenDeploy: () -> Unit,
+    onBack: () -> Unit,
+    showActions: Boolean,
+    onShowActions: (Boolean) -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
+            }
+            Text(
+                server.name.ifBlank { server.ip },
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Box {
+                IconButton(onClick = { onShowActions(true) }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "Действия с сервером")
+                }
+                DropdownMenu(expanded = showActions, onDismissRequest = { onShowActions(false) }) {
+                    DropdownMenuItem(text = { Text("Переименовать") }, onClick = {
+                        onShowActions(false)
+                        onRename()
+                    })
+                    DropdownMenuItem(text = { Text("Удалить", color = MaterialTheme.colorScheme.error) }, onClick = {
+                        onShowActions(false)
+                        onDelete()
+                    })
+                }
+            }
+        }
+        AppSectionCard(
+            contentPadding = PaddingValues(18.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(server.ip, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                if (server.manualPortsEnabled) "SSH ${server.sshPort} · DTLS ${server.dtlsPort} · WG ${server.wgPort}" else "SSH ${server.sshPort}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        ServerActionCard(
+            title = "Пользователи и подписки",
+            description = "Создавайте доступы, меняйте лимиты устройств и отключайте пользователей.",
+            onClick = onOpenAccess,
+        )
+        ServerActionCard(
+            title = "Установить / обновить сервер",
+            description = "Разверните или обновите wdtt-server на этом VPS.",
+            onClick = onOpenDeploy,
+        )
+        ServerActionCard(
+            title = "Настройки подключения",
+            description = "IP, SSH-доступ, DNS, порты и пароль владельца.",
+            onClick = onOpenDeploy,
+        )
+    }
+}
+
+@Composable
+private fun ServerActionCard(title: String, description: String, onClick: () -> Unit) {
+    AppSectionCard(
+        modifier = Modifier.clickable(onClick = onClick),
+        contentPadding = PaddingValues(18.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ServerListScreen(
     serversStore: ServersStore,
-    onOpenAccess: (String) -> Unit,
-    onOpenDeploy: (String) -> Unit,
+    onOpenServer: (String) -> Unit,
     onAddServer: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -188,8 +349,6 @@ private fun ServerListScreen(
     var isMultiDeploying by remember { mutableStateOf(false) }
     var activeDeployingServerId by remember { mutableStateOf<String?>(null) }
     var multiDeployJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    var deleteTarget by remember { mutableStateOf<ManagedServer?>(null) }
-    var renameTarget by remember { mutableStateOf<ManagedServer?>(null) }
 
     fun exitMultiSelect() {
         multiSelectMode = false
@@ -267,17 +426,15 @@ private fun ServerListScreen(
                             onCheckedChange = { checked ->
                                 selectedForDeploy = if (checked) selectedForDeploy + server.id else selectedForDeploy - server.id
                             },
-                            onOpenAccess = { onOpenAccess(server.id) },
-                            onOpenDeploy = { onOpenDeploy(server.id) },
-                            onRenameRequest = {},
+                            onOpenServer = { onOpenServer(server.id) },
                         )
                     } else {
-                        SwipeToDeleteServerCard(
+                        ServerCard(
                             server = server,
-                            onOpenAccess = { onOpenAccess(server.id) },
-                            onOpenDeploy = { onOpenDeploy(server.id) },
-                            onRequestDelete = { deleteTarget = server },
-                            onRenameRequest = { renameTarget = server },
+                            multiSelectMode = false,
+                            isChecked = false,
+                            onCheckedChange = {},
+                            onOpenServer = { onOpenServer(server.id) },
                         )
                     }
                 }
@@ -360,101 +517,6 @@ private fun ServerListScreen(
         )
     }
 
-    deleteTarget?.let { target ->
-        AlertDialog(
-            onDismissRequest = { deleteTarget = null },
-            title = {
-                Text(
-                    "Удалить сервер?",
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleLarge
-                )
-            },
-            text = {
-                Text("Вы действительно хотите удалить сервер «${target.name.ifBlank { target.ip }}»?\n\nЭто удалит только сохранённые данные подключения в приложении — сам сервер и всё, что на нём развёрнуто, не пострадает.")
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        scope.launch { serversStore.deleteServer(target.id) }
-                        deleteTarget = null
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text("Удалить", color = MaterialTheme.colorScheme.onError)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) {
-                    Text("Отмена")
-                }
-            }
-        )
-    }
-
-    renameTarget?.let { target ->
-        SaveServerNameDialog(
-            initialName = target.name.ifBlank { target.ip },
-            onDismiss = { renameTarget = null },
-            onConfirm = { newName ->
-                scope.launch { serversStore.updateServer(target.copy(name = newName)) }
-                renameTarget = null
-            }
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterialApi::class)
-@Composable
-private fun SwipeToDeleteServerCard(
-    server: ManagedServer,
-    onOpenAccess: () -> Unit,
-    onOpenDeploy: () -> Unit,
-    onRequestDelete: () -> Unit,
-    onRenameRequest: () -> Unit,
-) {
-    val dismissState = rememberDismissState(
-        confirmStateChange = { value ->
-            if (value == DismissValue.DismissedToStart) {
-                onRequestDelete()
-            }
-            false
-        }
-    )
-
-    SwipeToDismiss(
-        state = dismissState,
-        directions = setOf(DismissDirection.EndToStart),
-        background = {
-            if (dismissState.dismissDirection != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(28.dp))
-                        .background(MaterialTheme.colorScheme.errorContainer),
-                    contentAlignment = Alignment.CenterEnd
-                ) {
-                    Icon(
-                        Icons.Filled.Delete,
-                        contentDescription = "Удалить",
-                        tint = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.padding(end = 32.dp).size(28.dp)
-                    )
-                }
-            }
-        }
-    ) {
-        ServerCard(
-            server = server,
-            multiSelectMode = false,
-            isChecked = false,
-            onCheckedChange = {},
-            onOpenAccess = onOpenAccess,
-            onOpenDeploy = onOpenDeploy,
-            onRenameRequest = onRenameRequest,
-        )
-    }
 }
 
 @Composable
@@ -463,12 +525,10 @@ private fun ServerCard(
     multiSelectMode: Boolean,
     isChecked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
-    onOpenAccess: () -> Unit,
-    onOpenDeploy: () -> Unit,
-    onRenameRequest: () -> Unit,
+    onOpenServer: () -> Unit,
 ) {
     AppSectionCard(
-        modifier = Modifier.clickable(enabled = !multiSelectMode, onClick = onOpenAccess),
+        modifier = Modifier.clickable(enabled = !multiSelectMode, onClick = onOpenServer),
         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
         shadowElevation = 0.dp,
@@ -507,22 +567,6 @@ private fun ServerCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-            }
-            if (!multiSelectMode) {
-                IconButton(onClick = onRenameRequest) {
-                    Icon(
-                        Icons.Filled.Edit,
-                        contentDescription = "Переименовать",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                IconButton(onClick = onOpenDeploy) {
-                    Icon(
-                        Icons.Filled.CloudUpload,
-                        contentDescription = "Деплой",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
             }
         }
     }
