@@ -26,11 +26,11 @@ const (
 	sessionReadTimeout = 30 * time.Minute // Increased from 60s to 30min
 	readBufSize        = 1600
 	socketBufSize      = 625 * 1024
-	keepaliveByte = 0xFF // keepalive marker (DTLS-level или прямой obfs-кадр)
+	keepaliveByte      = 0xFF // keepalive marker (DTLS-level или прямой obfs-кадр)
 	// keepaliveInterval: 1с (как у референсного клиента) — агрессивнее держит
 	// TURN permission/NAT-маппинг "тёплым" на каждом из 18-108 relay-сокетов
 	// сессии, чем прежние 15с/5с.
-	keepaliveInterval = 1 * time.Second
+	keepaliveInterval = 10 * time.Second
 	// keepaliveMinSize/keepaliveMaxSize: keepalive-пакет теперь не
 	// фиксированного размера (было 1 байт постоянно) — случайная длина
 	// 25-44 байта имитирует "тишину" OPUS в реальном звонке; постоянный
