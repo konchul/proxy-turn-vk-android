@@ -4,7 +4,6 @@ import android.content.Intent
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,18 +20,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.DismissDirection
-import androidx.compose.material.DismissValue
-import androidx.compose.material.ExperimentalMaterialApi
-import androidx.compose.material.SwipeToDismiss
-import androidx.compose.material.rememberDismissState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -59,7 +56,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -69,14 +65,6 @@ import com.wdtt.client.ManagedServer
 import com.wdtt.client.ServersStore
 import kotlinx.coroutines.launch
 
-/**
- * Единая вкладка "Серверы" — список серверов на главном экране, тап по
- * карточке открывает доступы (бывший AdminTab), отдельная иконка на карточке
- * открывает деплой (бывший DeployTab), кнопка "+" создаёт новый сервер.
- * Мульти-деплой на несколько серверов сразу доступен прямо со списка через
- * режим множественного выбора (переиспользует performMultiDeploy из
- * DeployTab.kt).
- */
 private sealed class ServersTabScreen {
     object ServerList : ServersTabScreen()
     data class ServerOverview(val serverId: String) : ServersTabScreen()
@@ -96,7 +84,14 @@ fun ServersTab() {
     // На экранах конкретного сервера системный жест «Назад» должен вернуться
     // к списку серверов, а не закрыть Activity.
     BackHandler(enabled = screen !is ServersTabScreen.ServerList) {
-        screen = ServersTabScreen.ServerList
+        screen = when (val current = screen) {
+            is ServersTabScreen.AccessList -> ServersTabScreen.ServerOverview(current.serverId)
+            is ServersTabScreen.ServerDeploy -> current.serverId
+                ?.let { ServersTabScreen.ServerOverview(it) }
+                ?: ServersTabScreen.ServerList
+            is ServersTabScreen.ServerOverview -> ServersTabScreen.ServerList
+            is ServersTabScreen.ServerList -> ServersTabScreen.ServerList
+        }
     }
 
     Crossfade(targetState = screen, label = "servers_tab_content") { current ->
@@ -256,75 +251,176 @@ private fun ServerOverviewScreen(
     onDelete: () -> Unit,
 ) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.fillMaxSize(),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
-            }
-            Text(
-                server.name.ifBlank { server.ip },
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Box {
-                IconButton(onClick = { onShowActions(true) }) {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "Действия с сервером")
-                }
-                DropdownMenu(expanded = showActions, onDismissRequest = { onShowActions(false) }) {
-                    DropdownMenuItem(text = { Text("Переименовать") }, onClick = {
-                        onShowActions(false)
-                        onRename()
-                    })
-                    DropdownMenuItem(text = { Text("Удалить", color = MaterialTheme.colorScheme.error) }, onClick = {
-                        onShowActions(false)
-                        onDelete()
-                    })
-                }
-            }
-        }
-        AppSectionCard(
-            contentPadding = PaddingValues(18.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 1.dp,
         ) {
-            Text(server.ip, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(
-                if (server.manualPortsEnabled) "SSH ${server.sshPort} · DTLS ${server.dtlsPort} · WG ${server.wgPort}" else "SSH ${server.sshPort}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Назад к серверам",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Управление сервером",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        server.name.ifBlank { server.ip },
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Box {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        IconButton(onClick = { onShowActions(true) }) {
+                            Icon(
+                                Icons.Filled.MoreVert,
+                                contentDescription = "Действия с сервером",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    DropdownMenu(expanded = showActions, onDismissRequest = { onShowActions(false) }) {
+                        DropdownMenuItem(
+                            text = { Text("Переименовать") },
+                            leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+                            onClick = {
+                                onShowActions(false)
+                                onRename()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Удалить", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                            },
+                            onClick = {
+                                onShowActions(false)
+                                onDelete()
+                            },
+                        )
+                    }
+                }
+            }
         }
-        ServerActionCard(
-            title = "Пользователи и подписки",
-            description = "Создавайте доступы, меняйте лимиты устройств и отключайте пользователей.",
-            onClick = onOpenAccess,
-        )
-        ServerActionCard(
-            title = "Установить / обновить сервер",
-            description = "Разверните или обновите wdtt-server на этом VPS.",
-            onClick = onOpenDeploy,
-        )
-        ServerActionCard(
-            title = "Настройки подключения",
-            description = "IP, SSH-доступ, DNS, порты и пароль владельца.",
-            onClick = onOpenDeploy,
-        )
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            item {
+                AppSectionCard(
+                    contentPadding = PaddingValues(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                        ) {
+                            Icon(
+                                Icons.Filled.Dns,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(12.dp).size(24.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(server.ip, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "SSH ${server.sshPort}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    if (server.manualPortsEnabled) {
+                        Text(
+                            "DTLS ${server.dtlsPort}  ·  WireGuard ${server.wgPort}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            item {
+                Text(
+                    "Действия",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+                )
+            }
+            item {
+                ServerActionCard(
+                    icon = Icons.Filled.People,
+                    title = "Пользователи и подписки",
+                    description = "Доступы, лимиты устройств и сроки действия",
+                    onClick = onOpenAccess,
+                )
+            }
+            item {
+                ServerActionCard(
+                    icon = Icons.Filled.Settings,
+                    title = "Управление сервером",
+                    description = "SSH, порты, обновление и переустановка",
+                    onClick = onOpenDeploy,
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun ServerActionCard(title: String, description: String, onClick: () -> Unit) {
+private fun ServerActionCard(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    description: String,
+    onClick: () -> Unit,
+) {
     AppSectionCard(
         modifier = Modifier.clickable(onClick = onClick),
         contentPadding = PaddingValues(18.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(12.dp).size(23.dp),
+                )
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -359,33 +455,48 @@ private fun ServerListScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 16.dp),
+                .padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                "Серверы",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f)
-            )
-            if (servers.size > 1) {
-                IconButton(onClick = {
-                    if (multiSelectMode) exitMultiSelect() else multiSelectMode = true
-                }) {
-                    Icon(
-                        Icons.Filled.CloudUpload,
-                        contentDescription = if (multiSelectMode) "Отменить выбор" else "Деплой на несколько серверов",
-                        tint = if (multiSelectMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    if (multiSelectMode) "Выберите серверы" else "Серверы",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    if (multiSelectMode) "Выбрано: ${selectedForDeploy.size}" else "Управление вашими VPS",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (multiSelectMode) {
+                TextButton(onClick = ::exitMultiSelect) {
+                    Text("Отмена")
+                }
+            } else {
+                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                    IconButton(onClick = onAddServer) {
+                        Icon(
+                            Icons.Filled.Add,
+                            contentDescription = "Добавить сервер",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
                 }
             }
-            IconButton(onClick = onAddServer) {
-                Icon(
-                    Icons.Filled.Add,
-                    contentDescription = "Добавить сервер",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        }
+
+        if (servers.size > 1 && !multiSelectMode) {
+            OutlinedButton(
+                onClick = { multiSelectMode = true },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Icon(Icons.Filled.CloudUpload, contentDescription = null, modifier = Modifier.size(19.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Обновить несколько серверов", fontWeight = FontWeight.SemiBold)
             }
         }
 
@@ -405,10 +516,17 @@ private fun ServerListScreen(
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    "Серверов пока нет — нажмите «+», чтобы добавить и развернуть первый",
+                    "Добавьте первый VPS, чтобы установить сервер и управлять пользователями",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp),
                 )
+                Spacer(modifier = Modifier.height(18.dp))
+                Button(onClick = onAddServer, shape = RoundedCornerShape(16.dp)) {
+                    Icon(Icons.Filled.Add, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Добавить сервер")
+                }
             }
         } else {
             LazyColumn(
@@ -527,8 +645,10 @@ private fun ServerCard(
     onOpenServer: () -> Unit,
 ) {
     AppSectionCard(
-        modifier = Modifier.clickable(enabled = !multiSelectMode, onClick = onOpenServer),
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp),
+        modifier = Modifier.clickable {
+            if (multiSelectMode) onCheckedChange(!isChecked) else onOpenServer()
+        },
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 15.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
         shadowElevation = 0.dp,
     ) {
@@ -538,7 +658,17 @@ private fun ServerCard(
         ) {
             if (multiSelectMode) {
                 Checkbox(checked = isChecked, onCheckedChange = onCheckedChange)
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+            } else {
+                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                    Icon(
+                        Icons.Filled.Dns,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(11.dp).size(22.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -565,6 +695,13 @@ private fun ServerCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (!multiSelectMode) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "Открыть сервер",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

@@ -355,7 +355,7 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
                 )
             }
             Text(
-                "Настройки сервера",
+                "Управление сервером",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f)
