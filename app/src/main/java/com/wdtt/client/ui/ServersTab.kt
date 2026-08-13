@@ -164,11 +164,6 @@ private fun AccessListHost(
 ) {
     val servers by serversStore.servers.collectAsStateWithLifecycle(initialValue = emptyList())
     val server = servers.find { it.id == serverId }
-    val scope = rememberCoroutineScope()
-    var showActions by remember { mutableStateOf(false) }
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-    var showRename by remember { mutableStateOf(false) }
-
     LaunchedEffect(servers, serverId) {
         if (servers.isNotEmpty() && server == null) {
             onBack()
@@ -194,6 +189,10 @@ private fun ServerOverviewHost(
 ) {
     val servers by serversStore.servers.collectAsStateWithLifecycle(initialValue = emptyList())
     val server = servers.find { it.id == serverId }
+    val scope = rememberCoroutineScope()
+    var showActions by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showRename by remember { mutableStateOf(false) }
 
     LaunchedEffect(servers, serverId) {
         if (servers.isNotEmpty() && server == null) onBack()
