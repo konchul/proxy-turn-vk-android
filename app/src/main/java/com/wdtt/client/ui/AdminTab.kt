@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -66,7 +68,9 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.AdminApiClient
 import com.wdtt.client.ManagedServer
@@ -143,27 +147,37 @@ fun AccessListScreen(server: ManagedServer, onBack: () -> Unit) {
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (deployIp.isBlank() || deployMainPassword.isBlank()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
+            Box(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    Icons.Filled.Devices,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.height(48.dp)
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    "У этого сервера ещё не заполнены IP и пароль владельца — откройте деплой сервера",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                OutlinedButton(onClick = onBack) { Text("Назад к списку серверов") }
+                Column(
+                    modifier = Modifier.widthIn(max = 340.dp).fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        Icons.Filled.Devices,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(48.dp),
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        "У этого сервера ещё не заполнены IP и пароль владельца — откройте деплой сервера",
+                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(modifier = Modifier.height(30.dp))
+                    OutlinedButton(
+                        onClick = onBack,
+                        modifier = Modifier.widthIn(max = 304.dp).fillMaxWidth().heightIn(min = 48.dp),
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Text("Назад к списку серверов")
+                    }
+                }
             }
         } else {
             Column(modifier = Modifier.fillMaxSize()) {

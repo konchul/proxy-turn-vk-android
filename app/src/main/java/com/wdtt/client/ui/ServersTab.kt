@@ -42,6 +42,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -466,134 +468,143 @@ private fun ServerListScreen(
         multiDeployResults = emptyMap()
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    if (multiSelectMode) "Выберите серверы" else "Серверы",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    if (multiSelectMode) "Выбрано: ${selectedForDeploy.size}" else "Управление вашими VPS",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (multiSelectMode) "Выберите серверы" else "Серверы",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        if (multiSelectMode) "Выбрано: ${selectedForDeploy.size}" else "Управление вашими VPS",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (multiSelectMode) {
+                    TextButton(onClick = ::exitMultiSelect) {
+                        Text("Отмена")
+                    }
+                }
             }
-            if (multiSelectMode) {
-                TextButton(onClick = ::exitMultiSelect) {
-                    Text("Отмена")
+
+            if (servers.size > 1 && !multiSelectMode) {
+                OutlinedButton(
+                    onClick = { multiSelectMode = true },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Icon(Icons.Filled.CloudUpload, contentDescription = null, modifier = Modifier.size(19.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Обновить несколько серверов", fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            if (servers.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(
+                        modifier = Modifier.widthIn(max = 340.dp).fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Icon(
+                            Icons.Filled.Dns,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(48.dp),
+                        )
+                        Spacer(modifier = Modifier.height(26.dp))
+                        Text(
+                            "Добавьте первый VPS, чтобы установить сервер и управлять пользователями",
+                            style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(modifier = Modifier.height(30.dp))
+                        Button(
+                            onClick = onAddServer,
+                            modifier = Modifier.widthIn(max = 304.dp).fillMaxWidth().heightIn(min = 48.dp),
+                            shape = RoundedCornerShape(16.dp),
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Добавить сервер")
+                        }
+                    }
                 }
             } else {
-                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                    IconButton(onClick = onAddServer) {
-                        Icon(
-                            Icons.Filled.Add,
-                            contentDescription = "Добавить сервер",
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(
+                        start = 20.dp,
+                        end = 20.dp,
+                        top = 4.dp,
+                        bottom = if (multiSelectMode) 24.dp else 104.dp,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(servers, key = { it.id }) { server ->
+                        if (multiSelectMode) {
+                            ServerCard(
+                                server = server,
+                                multiSelectMode = true,
+                                isChecked = selectedForDeploy.contains(server.id),
+                                onCheckedChange = { checked ->
+                                    selectedForDeploy = if (checked) selectedForDeploy + server.id else selectedForDeploy - server.id
+                                },
+                                onOpenServer = { onOpenServer(server.id) },
+                            )
+                        } else {
+                            ServerCard(
+                                server = server,
+                                multiSelectMode = false,
+                                isChecked = false,
+                                onCheckedChange = {},
+                                onOpenServer = { onOpenServer(server.id) },
+                            )
+                        }
                     }
                 }
             }
-        }
 
-        if (servers.size > 1 && !multiSelectMode) {
-            OutlinedButton(
-                onClick = { multiSelectMode = true },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
-                shape = RoundedCornerShape(16.dp),
-            ) {
-                Icon(Icons.Filled.CloudUpload, contentDescription = null, modifier = Modifier.size(19.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Обновить несколько серверов", fontWeight = FontWeight.SemiBold)
-            }
-        }
-
-        if (servers.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 24.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    modifier = Modifier.widthIn(max = 340.dp).fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+            if (multiSelectMode && selectedForDeploy.isNotEmpty()) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.background,
                 ) {
-                    Icon(
-                        Icons.Filled.Dns,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(48.dp),
-                    )
-                    Spacer(modifier = Modifier.height(26.dp))
-                    Text(
-                        "Добавьте первый VPS, чтобы установить сервер и управлять пользователями",
-                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Spacer(modifier = Modifier.height(30.dp))
                     Button(
-                        onClick = onAddServer,
-                        modifier = Modifier.widthIn(max = 304.dp).fillMaxWidth().heightIn(min = 48.dp),
+                        onClick = { showMultiDeployConfirm = true },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp).height(48.dp),
                         shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
                     ) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Добавить сервер")
+                        Text("Установить на выбранные (${selectedForDeploy.size})", fontWeight = FontWeight.SemiBold)
                     }
                 }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                items(servers, key = { it.id }) { server ->
-                    if (multiSelectMode) {
-                        ServerCard(
-                            server = server,
-                            multiSelectMode = true,
-                            isChecked = selectedForDeploy.contains(server.id),
-                            onCheckedChange = { checked ->
-                                selectedForDeploy = if (checked) selectedForDeploy + server.id else selectedForDeploy - server.id
-                            },
-                            onOpenServer = { onOpenServer(server.id) },
-                        )
-                    } else {
-                        ServerCard(
-                            server = server,
-                            multiSelectMode = false,
-                            isChecked = false,
-                            onCheckedChange = {},
-                            onOpenServer = { onOpenServer(server.id) },
-                        )
-                    }
-                }
-                item { Spacer(modifier = Modifier.height(if (selectedForDeploy.isNotEmpty()) 96.dp else 24.dp)) }
             }
         }
 
-        if (multiSelectMode && selectedForDeploy.isNotEmpty()) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.background,
+        if (!multiSelectMode && servers.isNotEmpty()) {
+            FloatingActionButton(
+                onClick = onAddServer,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = 22.dp).size(58.dp),
+                shape = RoundedCornerShape(20.dp),
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp, pressedElevation = 8.dp),
             ) {
-                Button(
-                    onClick = { showMultiDeployConfirm = true },
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp).height(48.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
-                ) {
-                    Text("Установить на выбранные (${selectedForDeploy.size})", fontWeight = FontWeight.SemiBold)
-                }
+                Icon(Icons.Filled.Add, contentDescription = "Добавить сервер")
             }
         }
     }
