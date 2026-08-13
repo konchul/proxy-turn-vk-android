@@ -30,9 +30,6 @@ android {
             useSupportLibrary = true
         }
 
-        ndk {
-            abiFilters.addAll(targetAbis)
-        }
     }
 
     splits {
