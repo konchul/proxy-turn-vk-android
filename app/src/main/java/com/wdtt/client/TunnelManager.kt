@@ -133,6 +133,7 @@ object TunnelManager {
     private const val PIPELINE_HIDE_AFTER_SUCCESS_MS = 4_000L
     /** Лимит на один шаг схемы (кроме Потоков и Капчи). */
     private const val PIPELINE_STEP_TIMEOUT_MS = 10_000L
+    private const val PIPELINE_RAW_STEP_TIMEOUT_MS = 25_000L
     /** Вход в несколько звонков через аккаунт VK может занять дольше. */
     private const val PIPELINE_VK_STEP_TIMEOUT_MS = 30_000L
     /** Инкремент → MainActivity / SettingsTab открывают диалог ⚙️ настроек. */
@@ -525,12 +526,6 @@ object TunnelManager {
                         updateLog("vk_auth_ok", "[VK Auth] TURN OK (${credsByHash.size})", 5, false)
                         advanceConnectionPipeline(ConnectionStep.VK, ConnectionStep.WRAP)
                     } catch (e: kotlinx.coroutines.CancellationException) {
-                        if (isSwitching) {
-                            handleReconnectFailed("Подключение отменено")
-                        } else {
-                            updateLog("start_cancelled", "Подключение отменено", 50, false)
-                            finishConnectingFailed()
-                        }
                         throw e
                     } catch (e: Exception) {
                         val msg = e.message ?: e::class.java.simpleName
@@ -559,7 +554,9 @@ object TunnelManager {
                 wrapAuthTimeoutCount = 0
                 lastActiveAtMs = 0L
                 lastStatsReceivedAtMs = System.currentTimeMillis()
-                transportRestartInProgress = false
+                if (!isSwitching) {
+                    transportRestartInProgress = false
+                }
                 isConnecting.value = false
                 markRunning(true)
                 stats.value = "Ожидание данных..."
@@ -567,9 +564,7 @@ object TunnelManager {
                 startWatchdog(appContext, params)
 
             } catch (e: kotlinx.coroutines.CancellationException) {
-                if (isSwitching) {
-                    handleReconnectFailed("Подключение отменено")
-                } else {
+                if (!isSwitching) {
                     updateLog("start_cancelled", "Подключение отменено", 50, false)
                     finishConnectingFailed()
                 }
@@ -642,7 +637,8 @@ object TunnelManager {
     @SuppressLint("StaticFieldLeak")
     private fun startLogReader() {
         readerJob = scope.launch {
-            val reader = process?.inputStream?.bufferedReader() ?: return@launch
+            val observedProcess = process ?: return@launch
+            val reader = observedProcess.inputStream.bufferedReader()
             var collectingConfig = false
             val configBuilder = StringBuilder()
             var collectingRawConfig = false
@@ -1141,18 +1137,20 @@ object TunnelManager {
             } finally {
                 // Если процесс умер сам, ловим код выхода
                 try {
-                    val exitCode = process?.exitValue()
-                    if (exitCode != null && exitCode != 0 && !transportRestartInProgress) {
+                    val exitCode = observedProcess.exitValue()
+                    if (exitCode != 0 && !transportRestartInProgress) {
                         updateLog("sys_exit", "Процесс крашнулся с кодом $exitCode", 99, true)
                     }
                 } catch (_: IllegalThreadStateException) {
                     if (!transportRestartInProgress) {
-                        process?.destroy()
+                        observedProcess.destroy()
                     }
                 }
-                process = null
-                if (!transportRestartInProgress) {
-                    markRunning(false)
+                if (process === observedProcess) {
+                    process = null
+                    if (!transportRestartInProgress) {
+                        markRunning(false)
+                    }
                 }
             }
         }
@@ -1266,14 +1264,14 @@ object TunnelManager {
             now - lastStatsReceivedAtMs <= maxAgeMs
     }
 
-    fun reconnectAll(reason: String) {
+    fun reconnectAll(reason: String, force: Boolean = false) {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
 
         scope.launch {
             reconnectMutex.withLock {
                 val now = System.currentTimeMillis()
-                if (now - lastReconnectAtMs < MIN_RECONNECT_INTERVAL_MS) {
+                if (!force && now - lastReconnectAtMs < MIN_RECONNECT_INTERVAL_MS) {
                     updateLog("reconnect_skip", "Переподключение уже выполняется…", 50, false)
                     return@launch
                 }
@@ -1285,14 +1283,21 @@ object TunnelManager {
                 try {
                     withContext(Dispatchers.IO) {
                         ensureTransportStopped(params.port)
+                        if (params.isRawTunMode) {
+                            RawTunEngine.prepareForReconnect()
+                        }
                     }
                     withContext(Dispatchers.Main) {
-                        if (config.value != null && params.isSocksMode.not()) {
+                        if (config.value != null && params.isSocksMode.not() && !params.isRawTunMode) {
                             wgHelper?.reloadTunnel()
                         }
                     }
                     start(context, params, isSwitching = true)
                     startJob?.join()
+                    if (currentParams == null) return@withLock
+                    if (params.isRawTunMode) {
+                        awaitRawTunReady()
+                    }
                 } catch (e: CancellationException) {
                     transportRestartInProgress = false
                     throw e
@@ -1313,22 +1318,20 @@ object TunnelManager {
     }
 
     fun resume() {
-        val resumeCtx = lastContext?.get()
-        if (currentParams != null && resumeCtx != null) {
-            scope.launch {
-                isReconnecting.value = true
-                try {
-                    withContext(Dispatchers.Main) {
-                        if (config.value != null && currentParams?.isSocksMode != true) {
-                            wgHelper?.reloadTunnel()
-                        }
-                    }
-                    start(resumeCtx, currentParams!!, isSwitching = true)
-                } finally {
-                    isReconnecting.value = false
-                }
+        reconnectAll("сеть появилась", force = true)
+    }
+
+    private suspend fun awaitRawTunReady(timeoutMs: Long = 20_000L) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (RawTunEngine.running) return
+            val proc = process
+            if (proc == null || !proc.isAlive) {
+                error("RAW: go_client завершился до подъёма TUN")
             }
+            delay(100)
         }
+        error("RAW TUN не поднялся за ${timeoutMs / 1000} с")
     }
 
     // Убивает процесс без изменения running
@@ -1758,8 +1761,11 @@ object TunnelManager {
     private fun isAccountVkAuthActive(): Boolean =
         currentParams?.vkAuthMode?.equals("anonymous", ignoreCase = true) == false
 
-    private fun pipelineTimeoutFor(step: ConnectionStep): Long =
-        if (step == ConnectionStep.VK) PIPELINE_VK_STEP_TIMEOUT_MS else PIPELINE_STEP_TIMEOUT_MS
+    private fun pipelineTimeoutFor(step: ConnectionStep): Long = when (step) {
+        ConnectionStep.VK -> PIPELINE_VK_STEP_TIMEOUT_MS
+        ConnectionStep.RAW -> PIPELINE_RAW_STEP_TIMEOUT_MS
+        else -> PIPELINE_STEP_TIMEOUT_MS
+    }
 
     private fun armPipelineStepTimeout(step: ConnectionStep?) {
         cancelPipelineStepTimeout()

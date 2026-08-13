@@ -56,7 +56,6 @@ object RawTunEngine {
                 diag("RawTunVpnService instance obtained")
 
                 val pfd = vpn.establish(ip, dnsCsv, mtu)
-                running = true
                 diag("Builder.establish() returned pfd, fd=${pfd.fd}")
                 TunnelManager.addNetworkLog("[RAW] TUN поднят (ip=$ip, mtu=$mtu), жду go_client…")
 
@@ -66,11 +65,13 @@ object RawTunEngine {
                 try {
                     diag("TunFdBridge.sendOnce(sockName=$sockName) — waiting for go_client to connect and receive fd...")
                     TunFdBridge.sendOnce(sockName, pfd)
+                    running = true
                     diag("TunFdBridge.sendOnce() returned OK — fd handed off to go_client")
                     TunnelManager.addNetworkLog("[RAW] TUN fd передан в go_client")
                 } catch (e: Exception) {
                     diag("TunFdBridge.sendOnce() THREW: ${e.javaClass.simpleName}: ${e.message}", isError = true)
                     running = false
+                    vpn.closeTun()
                     throw e
                 }
             }
@@ -92,6 +93,14 @@ object RawTunEngine {
 
     suspend fun stop(context: Context) = mutex.withLock {
         withContext(Dispatchers.IO) { stopLocked(context) }
+    }
+
+    suspend fun prepareForReconnect() = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            running = false
+            RawTunVpnService.instance?.closeTun()
+            diag("RAW TUN закрыт перед переподключением")
+        }
     }
 
     fun onVpnRevoked() {
