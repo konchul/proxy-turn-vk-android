@@ -4,7 +4,9 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -39,6 +41,10 @@ class TunnelService : Service() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var networkRecoveryJob: Job? = null
     private var lastNetworkRecoveryAttemptMs = 0L
+    private var screenStateReceiver: BroadcastReceiver? = null
+    private var wakeRecoveryJob: Job? = null
+    private var wakeGraceUntilMs = 0L
+    private var deviceWasInteractive = true
     private val activeNetworks = mutableSetOf<Network>()
     private val networkFingerprints = mutableMapOf<Network, String>()
     private var lastUnderlyingFingerprint = ""
@@ -53,6 +59,7 @@ class TunnelService : Service() {
         // Сразу берем лок при создании
         acquireWakeLock()
         setupNetworkCallback()
+        setupScreenStateReceiver()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -417,17 +424,19 @@ class TunnelService : Service() {
     private fun scheduleNetworkRecovery() {
         networkRecoveryJob?.cancel()
         networkRecoveryJob = TunnelManager.scope.launch {
-            if (!TunnelManager.running.value || isTunnelPaused) return@launch
+            if (!TunnelManager.running.value || isTunnelPaused || !deviceWasInteractive) return@launch
             TunnelManager.addNetworkLog("[СЕТЬ] Сеть изменилась. Ждём стабилизации без перезапуска VPN.")
             delay(5_000)
-            if (!TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return@launch
+            if (!TunnelManager.running.value || isTunnelPaused || !deviceWasInteractive ||
+                System.currentTimeMillis() < wakeGraceUntilMs || !hasValidatedUnderlyingNetwork()) return@launch
             if (TunnelManager.hasRecentTransportActivity()) {
                 TunnelManager.addNetworkLog("[СЕТЬ] Транспорт пережил смену сети без переподключения.")
                 return@launch
             }
             TunnelManager.addNetworkLog("[СЕТЬ] После смены сети нет свежего ответа. Даём транспорту время восстановиться.")
             delay(30_000)
-            if (!TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return@launch
+            if (!TunnelManager.running.value || isTunnelPaused || !deviceWasInteractive ||
+                System.currentTimeMillis() < wakeGraceUntilMs || !hasValidatedUnderlyingNetwork()) return@launch
             if (TunnelManager.hasRecentTransportActivity()) {
                 TunnelManager.addNetworkLog("[СЕТЬ] Транспорт восстановился без перезапуска.")
                 return@launch
@@ -445,6 +454,52 @@ class TunnelService : Service() {
         val cm = connectivityManager ?: return false
         return activeNetworks.any { network ->
             cm.getNetworkCapabilities(network)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+        }
+    }
+
+    private fun setupScreenStateReceiver() {
+        deviceWasInteractive = (getSystemService(POWER_SERVICE) as PowerManager).isInteractive
+        screenStateReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        deviceWasInteractive = false
+                        wakeRecoveryJob?.cancel()
+                        wakeRecoveryJob = null
+                        wakeGraceUntilMs = 0L
+                        TunnelManager.addNetworkLog("[СОН] Экран выключен. Не перезапускаем VPN из-за фоновых событий сети.")
+                    }
+                    Intent.ACTION_SCREEN_ON -> {
+                        deviceWasInteractive = true
+                        scheduleWakeRecovery()
+                    }
+                }
+            }
+        }
+        registerReceiver(screenStateReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        })
+    }
+
+    private fun scheduleWakeRecovery() {
+        wakeRecoveryJob?.cancel()
+        wakeGraceUntilMs = System.currentTimeMillis() + 30_000L
+        wakeRecoveryJob = TunnelManager.scope.launch {
+            if (!TunnelManager.running.value || isTunnelPaused) return@launch
+            TunnelManager.addNetworkLog("[СОН] Устройство проснулось; даём текущему VPN восстановиться без перезапуска.")
+            delay(30_000)
+            if (!deviceWasInteractive || !TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return@launch
+            if (TunnelManager.hasRecentTransportActivity(45_000L)) {
+                TunnelManager.addNetworkLog("[СОН] VPN подал свежие признаки жизни после пробуждения.")
+                return@launch
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastNetworkRecoveryAttemptMs < 120_000L) return@launch
+            lastNetworkRecoveryAttemptMs = now
+            updateNotification("Восстановление после сна...")
+            TunnelManager.addNetworkLog("[СОН] VPN не ожил после пробуждения. Мягко переподключаем транспорт.")
+            TunnelManager.restartTransport()
         }
     }
 
@@ -650,6 +705,8 @@ class TunnelService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         networkRecoveryJob?.cancel()
+        wakeRecoveryJob?.cancel()
+        screenStateReceiver?.let { unregisterReceiver(it) }
         networkCallback?.let {
             connectivityManager?.unregisterNetworkCallback(it)
         }
