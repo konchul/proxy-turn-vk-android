@@ -14,9 +14,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,7 +62,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.ManagedServer
 import com.wdtt.client.ServersStore
@@ -253,70 +258,77 @@ private fun ServerOverviewScreen(
     Column(
         modifier = Modifier.fillMaxSize(),
     ) {
-        Surface(
-            color = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(bottomStart = 26.dp, bottomEnd = 26.dp),
-            tonalElevation = 0.dp,
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Назад к серверам",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                IconButton(onClick = onBack) {
+                Text(
+                    "Управление сервером",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    server.ip,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Box {
+                IconButton(onClick = { onShowActions(true) }) {
                     Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Назад к серверам",
-                        tint = MaterialTheme.colorScheme.onSurface,
+                        Icons.Filled.MoreVert,
+                        contentDescription = "Действия с сервером",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "Управление сервером",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                DropdownMenu(
+                    expanded = showActions,
+                    onDismissRequest = { onShowActions(false) },
+                    modifier = Modifier.width(216.dp).padding(vertical = 4.dp),
+                    shape = RoundedCornerShape(22.dp),
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    tonalElevation = 2.dp,
+                    shadowElevation = 6.dp,
+                ) {
+                    DropdownMenuItem(
+                        modifier = Modifier.heightIn(min = 54.dp),
+                        contentPadding = PaddingValues(horizontal = 18.dp),
+                        text = { Text("Переименовать", fontWeight = FontWeight.Medium) },
+                        leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+                        onClick = {
+                            onShowActions(false)
+                            onRename()
+                        },
                     )
-                    Text(
-                        server.name.ifBlank { server.ip },
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    DropdownMenuItem(
+                        modifier = Modifier.heightIn(min = 54.dp),
+                        contentPadding = PaddingValues(horizontal = 18.dp),
+                        text = { Text("Удалить", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Medium) },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                        },
+                        onClick = {
+                            onShowActions(false)
+                            onDelete()
+                        },
                     )
-                }
-                Box {
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                    ) {
-                        IconButton(onClick = { onShowActions(true) }) {
-                            Icon(
-                                Icons.Filled.MoreVert,
-                                contentDescription = "Действия с сервером",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    DropdownMenu(expanded = showActions, onDismissRequest = { onShowActions(false) }) {
-                        DropdownMenuItem(
-                            text = { Text("Переименовать") },
-                            leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) },
-                            onClick = {
-                                onShowActions(false)
-                                onRename()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Удалить", color = MaterialTheme.colorScheme.error) },
-                            leadingIcon = {
-                                Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
-                            },
-                            onClick = {
-                                onShowActions(false)
-                                onDelete()
-                            },
-                        )
-                    }
                 }
             }
         }
@@ -504,31 +516,38 @@ private fun ServerListScreen(
         }
 
         if (servers.isEmpty()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
+            Box(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    Icons.Filled.Dns,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.height(48.dp)
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    "Добавьте первый VPS, чтобы установить сервер и управлять пользователями",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-                Spacer(modifier = Modifier.height(18.dp))
-                Button(onClick = onAddServer, shape = RoundedCornerShape(16.dp)) {
-                    Icon(Icons.Filled.Add, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Добавить сервер")
+                Column(
+                    modifier = Modifier.widthIn(max = 340.dp).fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        Icons.Filled.Dns,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(48.dp),
+                    )
+                    Spacer(modifier = Modifier.height(26.dp))
+                    Text(
+                        "Добавьте первый VPS, чтобы установить сервер и управлять пользователями",
+                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(modifier = Modifier.height(30.dp))
+                    Button(
+                        onClick = onAddServer,
+                        modifier = Modifier.widthIn(max = 304.dp).fillMaxWidth().heightIn(min = 48.dp),
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Добавить сервер")
+                    }
                 }
             }
         } else {
