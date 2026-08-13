@@ -49,6 +49,7 @@ class TunnelService : Service() {
     private val networkFingerprints = mutableMapOf<Network, String>()
     private var lastUnderlyingFingerprint = ""
     private var isTunnelPaused = false
+    private var recoveringFromNetworkLoss = false
     private var lastVpnReconnectAttemptMs = 0L
     private var wasOnWifi = false
 
@@ -280,8 +281,9 @@ class TunnelService : Service() {
                     if (isTunnelPaused) {
                         isTunnelPaused = false
                         Log.d("TunnelService", "Сеть появилась, возобновляем туннель")
-                        updateNotification("Переподключение...")
-                        TunnelManager.resume()
+                        recoveringFromNetworkLoss = true
+                        updateNotification("Ожидание сети...")
+                        scheduleNetworkReturnRecovery()
                     } else {
                         noteUnderlyingNetworkChange()
                     }
@@ -296,6 +298,7 @@ class TunnelService : Service() {
                 networkFingerprints.remove(network)
                 if (activeNetworks.isEmpty() && TunnelManager.running.value && !isTunnelPaused) {
                     isTunnelPaused = true
+                    recoveringFromNetworkLoss = true
                     lastUnderlyingFingerprint = ""
                     Log.d("TunnelService", "Сеть потеряна, приостанавливаем туннель")
                     TunnelManager.pause()
@@ -417,7 +420,29 @@ class TunnelService : Service() {
                 return@launch
             }
 
-            scheduleNetworkRecovery()
+            if (recoveringFromNetworkLoss) {
+                scheduleNetworkReturnRecovery()
+            } else {
+                scheduleNetworkRecovery()
+            }
+        }
+    }
+
+    private fun scheduleNetworkReturnRecovery() {
+        networkRecoveryJob?.cancel()
+        networkRecoveryJob = TunnelManager.scope.launch {
+            if (!TunnelManager.running.value || isTunnelPaused) return@launch
+            TunnelManager.addNetworkLog("[СЕТЬ] Сеть появилась. Ждём подтверждения и стабилизации.")
+            delay(5_000)
+            val validationDeadline = System.currentTimeMillis() + 25_000L
+            while (!hasValidatedUnderlyingNetwork() && System.currentTimeMillis() < validationDeadline) {
+                if (!TunnelManager.running.value || isTunnelPaused) return@launch
+                delay(1_000)
+            }
+            if (!TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return@launch
+            recoveringFromNetworkLoss = false
+            updateNotification("Переподключение...")
+            TunnelManager.resume()
         }
     }
 

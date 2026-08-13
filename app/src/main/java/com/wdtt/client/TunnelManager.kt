@@ -491,7 +491,20 @@ object TunnelManager {
                 }
 
                 setConnectionPipelineCurrent(ConnectionStep.DNS)
-                val dnsProbe = GoDnsProbe.check(params.goDnsArg)
+                var dnsProbe = GoDnsProbe.check(params.goDnsArg)
+                if (isSwitching && !dnsProbe.reachable) {
+                    for (attempt in 2..4) {
+                        updateLog(
+                            "go_dns_reconnect_wait",
+                            "[СЕТЬ] DNS ещё не готов после смены сети. Повторяем проверку ($attempt/4)...",
+                            50,
+                            false,
+                        )
+                        delay(2_000)
+                        dnsProbe = GoDnsProbe.check(params.goDnsArg)
+                        if (dnsProbe.reachable) break
+                    }
+                }
                 if (!dnsProbe.reachable) {
                     updateLog(
                         "go_dns_precheck_fail",
@@ -1294,7 +1307,7 @@ object TunnelManager {
                     }
                     start(context, params, isSwitching = true)
                     startJob?.join()
-                    if (currentParams == null) return@withLock
+                    if (currentParams == null || process == null) return@withLock
                     if (params.isRawTunMode) {
                         awaitRawTunReady()
                     }
