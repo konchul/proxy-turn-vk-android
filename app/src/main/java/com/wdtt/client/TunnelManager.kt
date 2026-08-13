@@ -1258,6 +1258,14 @@ object TunnelManager {
         reconnectAll("смена сети")
     }
 
+    fun hasRecentTransportActivity(maxAgeMs: Long = 25_000L): Boolean {
+        val now = System.currentTimeMillis()
+        return running.value &&
+            activeWorkers.value > 0 &&
+            lastStatsReceivedAtMs > 0L &&
+            now - lastStatsReceivedAtMs <= maxAgeMs
+    }
+
     fun reconnectAll(reason: String) {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
