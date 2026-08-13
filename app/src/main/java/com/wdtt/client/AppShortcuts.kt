@@ -8,9 +8,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 object AppShortcuts {
-    const val ACTION_ADD_PROFILE = "com.wdtt.client.shortcut.ADD_PROFILE"
+    const val ACTION_START_TUNNEL = "com.wdtt.client.shortcut.START_TUNNEL"
+    const val ACTION_STOP_TUNNEL = "com.wdtt.client.shortcut.STOP_TUNNEL"
 
     private val removedShortcutIds = listOf(
+        "shortcut_add_profile",
         "shortcut_toggle_tunnel",
         "shortcut_toggle_vk_mode",
     )

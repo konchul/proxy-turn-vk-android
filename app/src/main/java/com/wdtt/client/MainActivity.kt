@@ -132,8 +132,6 @@ class MainActivity : ComponentActivity() {
         // URI файла .qwdtt, ожидающего импорта
         val pendingFileUri = mutableStateOf<Uri?>(null)
 
-        // Открыть экран создания профиля из ярлыка лаунчера
-        val pendingAddProfile = mutableStateOf(false)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -144,9 +142,8 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIncomingIntent(intent: Intent?) {
         when (intent?.action) {
-            AppShortcuts.ACTION_ADD_PROFILE -> {
-                pendingAddProfile.value = true
-            }
+            AppShortcuts.ACTION_START_TUNNEL -> startTunnelFromShortcut()
+            AppShortcuts.ACTION_STOP_TUNNEL -> TunnelControl.stop(applicationContext)
             Intent.ACTION_VIEW -> {
                 val uri = intent.data
                 if (uri != null) {
@@ -154,6 +151,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun startTunnelFromShortcut() {
+        if (TunnelManager.running.value || TunnelManager.isConnecting.value) return
+        prepareVpnThen { TunnelControl.startFromSavedSettings(applicationContext) }
     }
 
     override fun onStart() {
@@ -335,15 +337,7 @@ fun MainScreen(
         }
     }
 
-    val pendingAddProfile = MainActivity.pendingAddProfile.value
     var requestCreateProfile by remember { mutableStateOf(false) }
-    LaunchedEffect(pendingAddProfile) {
-        if (pendingAddProfile) {
-            selectedTab = 2
-            requestCreateProfile = true
-            MainActivity.pendingAddProfile.value = false
-        }
-    }
 
     LaunchedEffect(Unit) {
         val supportShownFor = settingsStore.supportNoticeShownVersionCode.first()

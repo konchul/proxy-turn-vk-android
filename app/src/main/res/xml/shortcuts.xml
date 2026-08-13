@@ -1,13 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
     <shortcut
-        android:shortcutId="shortcut_add_profile"
+        android:shortcutId="shortcut_start_tunnel"
         android:enabled="true"
-        android:icon="@drawable/ic_shortcut_add"
-        android:shortcutShortLabel="@string/shortcut_add_short"
-        android:shortcutLongLabel="@string/shortcut_add_long">
+        android:icon="@drawable/ic_shortcut_start"
+        android:shortcutShortLabel="@string/shortcut_start_short"
+        android:shortcutLongLabel="@string/shortcut_start_long">
         <intent
-            android:action="com.wdtt.client.shortcut.ADD_PROFILE"
+            android:action="com.wdtt.client.shortcut.START_TUNNEL"
+            android:targetClass="com.wdtt.client.MainActivity"
+            android:targetPackage="net.qwdtt.client" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="shortcut_stop_tunnel"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_stop"
+        android:shortcutShortLabel="@string/shortcut_stop_short"
+        android:shortcutLongLabel="@string/shortcut_stop_long">
+        <intent
+            android:action="com.wdtt.client.shortcut.STOP_TUNNEL"
             android:targetClass="com.wdtt.client.MainActivity"
             android:targetPackage="net.qwdtt.client" />
     </shortcut>
