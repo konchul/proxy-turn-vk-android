@@ -13,6 +13,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
@@ -49,10 +50,11 @@ fun AppSectionCard(
     color: Color? = null,
     shadowElevation: Dp? = null,
     tonalElevation: Dp? = null,
+    shape: Shape = RoundedCornerShape(28.dp),
     content: @Composable ColumnScope.() -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(28.dp),
+        shape = shape,
         color = color ?: appSectionCardColor(),
         contentColor = MaterialTheme.colorScheme.onSurface,
         border = border ?: BorderStroke(1.dp, appSectionCardBorderColor()),

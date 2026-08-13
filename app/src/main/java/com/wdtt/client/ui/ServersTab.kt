@@ -255,10 +255,11 @@ private fun ServerOverviewScreen(
     ) {
         Surface(
             color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 1.dp,
+            shape = RoundedCornerShape(bottomStart = 26.dp, bottomEnd = 26.dp),
+            tonalElevation = 0.dp,
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onBack) {
@@ -276,8 +277,8 @@ private fun ServerOverviewScreen(
                     )
                     Text(
                         server.name.ifBlank { server.ip },
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -285,7 +286,7 @@ private fun ServerOverviewScreen(
                 }
                 Box {
                     Surface(
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(16.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
                     ) {
                         IconButton(onClick = { onShowActions(true) }) {
@@ -321,24 +322,25 @@ private fun ServerOverviewScreen(
         }
         LazyColumn(
             modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item {
                 AppSectionCard(
-                    contentPadding = PaddingValues(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                    shape = RoundedCornerShape(24.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Surface(
-                            shape = RoundedCornerShape(14.dp),
+                            shape = RoundedCornerShape(16.dp),
                             color = MaterialTheme.colorScheme.primaryContainer,
                         ) {
                             Icon(
                                 Icons.Filled.Dns,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.padding(12.dp).size(24.dp),
+                                modifier = Modifier.padding(10.dp).size(22.dp),
                             )
                         }
                         Spacer(Modifier.width(12.dp))
@@ -366,7 +368,7 @@ private fun ServerOverviewScreen(
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+                    modifier = Modifier.padding(start = 4.dp, top = 2.dp),
                 )
             }
             item {
@@ -398,20 +400,21 @@ private fun ServerActionCard(
 ) {
     AppSectionCard(
         modifier = Modifier.clickable(onClick = onClick),
-        contentPadding = PaddingValues(18.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp),
+        shape = RoundedCornerShape(24.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
                 Icon(
                     icon,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.padding(12.dp).size(23.dp),
+                    modifier = Modifier.padding(10.dp).size(22.dp),
                 )
             }
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
