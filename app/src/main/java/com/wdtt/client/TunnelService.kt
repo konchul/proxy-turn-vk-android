@@ -381,8 +381,11 @@ class TunnelService : Service() {
     }
 
     private fun activeUnderlyingFingerprint(): String {
+        val cm = connectivityManager ?: return ""
         return activeNetworks.mapNotNull { network ->
-            networkFingerprints[network]?.let { fingerprint -> "$network:$fingerprint" }
+            val caps = cm.getNetworkCapabilities(network) ?: return@mapNotNull null
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return@mapNotNull null
+            "$network:${networkCapabilityFingerprint(caps)}"
         }.sorted().joinToString("|")
     }
 
@@ -441,6 +444,7 @@ class TunnelService : Service() {
             }
             if (!TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return@launch
             recoveringFromNetworkLoss = false
+            wasOnWifi = isUnderlyingWifiActive()
             updateNotification("Переподключение...")
             TunnelManager.resume()
         }
@@ -449,29 +453,15 @@ class TunnelService : Service() {
     private fun scheduleNetworkRecovery() {
         networkRecoveryJob?.cancel()
         networkRecoveryJob = TunnelManager.scope.launch {
-            if (!TunnelManager.running.value || isTunnelPaused || !deviceWasInteractive) return@launch
-            TunnelManager.addNetworkLog("[СЕТЬ] Сеть изменилась. Ждём стабилизации без перезапуска VPN.")
+            if (!TunnelManager.running.value || isTunnelPaused) return@launch
+            TunnelManager.addNetworkLog("[СЕТЬ] Сеть изменилась. Ждём стабилизации перед полным переподключением.")
             delay(5_000)
-            if (!TunnelManager.running.value || isTunnelPaused || !deviceWasInteractive ||
+            if (!TunnelManager.running.value || isTunnelPaused ||
                 System.currentTimeMillis() < wakeGraceUntilMs || !hasValidatedUnderlyingNetwork()) return@launch
-            if (TunnelManager.hasRecentTransportActivity()) {
-                TunnelManager.addNetworkLog("[СЕТЬ] Транспорт пережил смену сети без переподключения.")
-                return@launch
-            }
-            TunnelManager.addNetworkLog("[СЕТЬ] После смены сети нет свежего ответа. Даём транспорту время восстановиться.")
-            delay(30_000)
-            if (!TunnelManager.running.value || isTunnelPaused || !deviceWasInteractive ||
-                System.currentTimeMillis() < wakeGraceUntilMs || !hasValidatedUnderlyingNetwork()) return@launch
-            if (TunnelManager.hasRecentTransportActivity()) {
-                TunnelManager.addNetworkLog("[СЕТЬ] Транспорт восстановился без перезапуска.")
-                return@launch
-            }
-            val now = System.currentTimeMillis()
-            if (now - lastNetworkRecoveryAttemptMs < 120_000L) return@launch
-            lastNetworkRecoveryAttemptMs = now
+            lastNetworkRecoveryAttemptMs = System.currentTimeMillis()
             updateNotification("Восстановление соединения...")
-            TunnelManager.addNetworkLog("[СЕТЬ] Новая сеть подтверждена, но трафик не восстановился. Мягко переподключаем транспорт.")
-            TunnelManager.restartTransport()
+            TunnelManager.addNetworkLog("[СЕТЬ] Новая сеть подтверждена. Полностью пересоздаём VPN и транспорт.")
+            TunnelManager.reconnectAll("смена сети", force = true)
         }
     }
 

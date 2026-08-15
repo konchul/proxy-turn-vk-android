@@ -1298,18 +1298,23 @@ object TunnelManager {
                         ensureTransportStopped(params.port)
                         if (params.isRawTunMode) {
                             RawTunEngine.prepareForReconnect()
+                        } else if (!params.isSocksMode) {
+                            wgHelper?.stopTunnel()
                         }
                     }
-                    withContext(Dispatchers.Main) {
-                        if (config.value != null && params.isSocksMode.not() && !params.isRawTunMode) {
-                            wgHelper?.reloadTunnel()
-                        }
-                    }
+                    activeWorkers.value = 0
+                    processStartedAtMs = 0L
+                    lastActiveAtMs = 0L
+                    lastStatsReceivedAtMs = 0L
+                    markRunning(false)
+                    config.value = null
                     start(context, params, isSwitching = true)
                     startJob?.join()
                     if (currentParams == null || process == null) return@withLock
                     if (params.isRawTunMode) {
                         awaitRawTunReady()
+                    } else if (!params.isSocksMode) {
+                        awaitWireGuardReady()
                     }
                 } catch (e: CancellationException) {
                     transportRestartInProgress = false
@@ -1345,6 +1350,23 @@ object TunnelManager {
             delay(100)
         }
         error("RAW TUN не поднялся за ${timeoutMs / 1000} с")
+    }
+
+    private suspend fun awaitWireGuardReady(timeoutMs: Long = 20_000L) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            when (wgHelper?.watchdogState()) {
+                WireGuardHelper.WatchdogState.UP,
+                WireGuardHelper.WatchdogState.DISABLED_BY_EMPTY_WHITELIST -> return
+                else -> Unit
+            }
+            val proc = process
+            if (proc == null || !proc.isAlive) {
+                error("WireGuard: go_client завершился до подъёма VPN")
+            }
+            delay(100)
+        }
+        error("WireGuard VPN не поднялся за ${timeoutMs / 1000} с")
     }
 
     // Убивает процесс без изменения running
