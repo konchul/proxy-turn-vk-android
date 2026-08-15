@@ -116,6 +116,15 @@ class TunnelService : Service() {
                             intent.getIntExtra("socks_port", 0).takeIf { it > 0 }
                                 ?: store.socksPort.first()
                         )
+                        val socksAuthEnabled = if (intent.hasExtra("socks_auth_enabled")) {
+                            intent.getBooleanExtra("socks_auth_enabled", false)
+                        } else {
+                            store.socksAuthEnabled.first()
+                        }
+                        val socksUsername = intent.getStringExtra("socks_username")
+                            ?: store.socksUsername.first()
+                        val socksPassword = intent.getStringExtra("socks_password")
+                            ?: store.socksPassword.first()
                         
                         val params = TunnelParams(
                             peer = peerWithPort,
@@ -134,6 +143,9 @@ class TunnelService : Service() {
                             obfsMode = obfsMode,
                             connectionMode = connectionMode,
                             socksPort = socksPort,
+                            socksAuthEnabled = socksAuthEnabled,
+                            socksUsername = socksUsername,
+                            socksPassword = socksPassword,
                             noDtls = noDtlsEnabled,
                             turnTcp = store.turnTcpEnabled.first(),
                             detailedLogs = store.detailedLogs.first()
@@ -211,6 +223,9 @@ class TunnelService : Service() {
                     obfsMode = SettingsStore.normalizeObfsMode(store.obfsMode.first()),
                     connectionMode = SettingsStore.normalizeConnectionMode(store.connectionMode.first()),
                     socksPort = SettingsStore.normalizeSocksPort(store.socksPort.first()),
+                    socksAuthEnabled = store.socksAuthEnabled.first(),
+                    socksUsername = store.socksUsername.first(),
+                    socksPassword = store.socksPassword.first(),
                     noDtls = noDtlsEnabled,
                     turnTcp = store.turnTcpEnabled.first(),
                     detailedLogs = store.detailedLogs.first()
@@ -445,8 +460,7 @@ class TunnelService : Service() {
             if (!TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return@launch
             recoveringFromNetworkLoss = false
             wasOnWifi = isUnderlyingWifiActive()
-            updateNotification("Переподключение...")
-            TunnelManager.resume()
+            performHybridNetworkRecovery("сеть появилась")
         }
     }
 
@@ -454,15 +468,37 @@ class TunnelService : Service() {
         networkRecoveryJob?.cancel()
         networkRecoveryJob = TunnelManager.scope.launch {
             if (!TunnelManager.running.value || isTunnelPaused) return@launch
-            TunnelManager.addNetworkLog("[СЕТЬ] Сеть изменилась. Ждём стабилизации перед полным переподключением.")
-            delay(5_000)
+            val changedAt = System.currentTimeMillis()
+            TunnelManager.addNetworkLog("[СЕТЬ] Сеть изменилась. Даём туннелю 15 секунд на самостоятельное восстановление.")
+            delay(15_000)
             if (!TunnelManager.running.value || isTunnelPaused ||
                 System.currentTimeMillis() < wakeGraceUntilMs || !hasValidatedUnderlyingNetwork()) return@launch
-            lastNetworkRecoveryAttemptMs = System.currentTimeMillis()
-            updateNotification("Восстановление соединения...")
-            TunnelManager.addNetworkLog("[СЕТЬ] Новая сеть подтверждена. Полностью пересоздаём VPN и транспорт.")
-            TunnelManager.reconnectAll("смена сети", force = true)
+            if (TunnelManager.hasDownlinkTrafficSince(changedAt)) {
+                TunnelManager.addNetworkLog("[СЕТЬ] Туннель сам восстановил трафик на новой сети.")
+                return@launch
+            }
+            performHybridNetworkRecovery("смена сети")
         }
+    }
+
+    private suspend fun performHybridNetworkRecovery(reason: String) {
+        if (!TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return
+        lastNetworkRecoveryAttemptMs = System.currentTimeMillis()
+        val softRestartAt = System.currentTimeMillis()
+        updateNotification("Восстановление транспорта...")
+        TunnelManager.addNetworkLog("[СЕТЬ] Мягко перезапускаем транспорт, не закрывая VPN-интерфейс.")
+        TunnelManager.restartTransport(reason, force = true)
+        delay(30_000)
+        if (!TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return
+        if (TunnelManager.hasHealthyRestartSince(softRestartAt)) {
+            updateNotification("Подключено")
+            TunnelManager.addNetworkLog("[СЕТЬ] Транспорт восстановился без пересоздания VPN.")
+            return
+        }
+        lastNetworkRecoveryAttemptMs = System.currentTimeMillis()
+        updateNotification("Полное восстановление...")
+        TunnelManager.addNetworkLog("[СЕТЬ] Мягкий перезапуск не вернул связь. Полностью пересоздаём VPN и транспорт.")
+        TunnelManager.reconnectAll("$reason: резервное восстановление", force = true)
     }
 
     private fun hasValidatedUnderlyingNetwork(): Boolean {

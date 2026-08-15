@@ -45,6 +45,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.Color
@@ -170,6 +171,11 @@ fun SettingsTabContent(
         initialValue = SettingsStore.DEFAULT_SOCKS_PORT
     )
     var socksPortInput by rememberSaveable { mutableStateOf(SettingsStore.DEFAULT_SOCKS_PORT.toString()) }
+    val socksAuthEnabled by settingsStore.socksAuthEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val savedSocksUsername by settingsStore.socksUsername.collectAsStateWithLifecycle(initialValue = "")
+    val savedSocksPassword by settingsStore.socksPassword.collectAsStateWithLifecycle(initialValue = "")
+    var socksUsernameInput by rememberSaveable { mutableStateOf("") }
+    var socksPasswordInput by rememberSaveable { mutableStateOf("") }
     val turnTcpEnabled by settingsStore.turnTcpEnabled.collectAsStateWithLifecycle(initialValue = true)
     val serverRawPort by settingsStore.serverRawPort.collectAsStateWithLifecycle(initialValue = 56003)
     var serverRawPortInput by rememberSaveable { mutableStateOf("56003") }
@@ -248,6 +254,12 @@ fun SettingsTabContent(
     val interfaceRole by settingsStore.interfaceRole.collectAsStateWithLifecycle(initialValue = "admin")
     LaunchedEffect(socksPort) {
         socksPortInput = socksPort.toString()
+    }
+    LaunchedEffect(savedSocksUsername) {
+        socksUsernameInput = savedSocksUsername
+    }
+    LaunchedEffect(savedSocksPassword) {
+        socksPasswordInput = savedSocksPassword
     }
     var goDnsCustomInput by rememberSaveable { mutableStateOf("") }
     var goDnsDohCustomInput by rememberSaveable { mutableStateOf("") }
@@ -457,7 +469,10 @@ fun SettingsTabContent(
 
     val isPeerValid = peerInput.isNotBlank()
     val isHashesValid = combinedHashes.isNotBlank()
-    val isValid = isPeerValid && isHashesValid && savedConnectionPassword.isNotBlank() && !hasInputHashErrors
+    val socksAuthValid = connectionMode != SettingsStore.CONNECTION_MODE_SOCKS || !socksAuthEnabled ||
+        (socksUsernameInput.isNotBlank() && socksPasswordInput.isNotBlank())
+    val isValid = isPeerValid && isHashesValid && savedConnectionPassword.isNotBlank() &&
+        !hasInputHashErrors && socksAuthValid
     val effectiveServerDtlsPort = if (manualPortsEnabled) serverDtlsPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56000 else 56000
     val effectiveLocalPort = if (manualPortsEnabled) portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000 else 9000
     fun startTunnelService() {
@@ -498,6 +513,9 @@ fun SettingsTabContent(
                 putExtra("obfs_mode", obfsMode)
                 putExtra("connection_mode", connectionMode)
                 putExtra("socks_port", SettingsStore.normalizeSocksPort(socksPortInput.toIntOrNull() ?: socksPort))
+                putExtra("socks_auth_enabled", socksAuthEnabled)
+                putExtra("socks_username", socksUsernameInput)
+                putExtra("socks_password", socksPasswordInput)
             }
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
             else context.startService(intent)
@@ -1261,6 +1279,79 @@ fun SettingsTabContent(
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(14.dp),
                             )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "Авторизация SOCKS5",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                    Text(
+                                        "Требовать логин и пароль от прокси-клиента",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(
+                                    checked = socksAuthEnabled,
+                                    onCheckedChange = { enabled ->
+                                        scope.launch {
+                                            settingsStore.saveSocksAuthEnabled(enabled)
+                                        }
+                                    },
+                                    enabled = !tunnelRunning,
+                                )
+                            }
+                            AnimatedVisibility(visible = socksAuthEnabled) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedTextField(
+                                        value = socksUsernameInput,
+                                        onValueChange = { value ->
+                                            if (value.toByteArray().size <= 255) {
+                                                socksUsernameInput = value
+                                                scope.launch {
+                                                    settingsStore.saveSocksUsername(value)
+                                                }
+                                            }
+                                        },
+                                        label = { Text("Логин SOCKS5") },
+                                        singleLine = true,
+                                        enabled = !tunnelRunning,
+                                        isError = socksUsernameInput.isBlank(),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(14.dp),
+                                    )
+                                    OutlinedTextField(
+                                        value = socksPasswordInput,
+                                        onValueChange = { value ->
+                                            if (value.toByteArray().size <= 255) {
+                                                socksPasswordInput = value
+                                                scope.launch {
+                                                    settingsStore.saveSocksPassword(value)
+                                                }
+                                            }
+                                        },
+                                        label = { Text("Пароль SOCKS5") },
+                                        singleLine = true,
+                                        enabled = !tunnelRunning,
+                                        isError = socksPasswordInput.isBlank(),
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(14.dp),
+                                    )
+                                    if (!socksAuthValid) {
+                                        Text(
+                                            "Для запуска SOCKS5 заполните логин и пароль",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                }
+                            }
                             Surface(
                                 onClick = {
                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

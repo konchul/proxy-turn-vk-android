@@ -33,6 +33,9 @@ object TunnelControl {
             val obfsMode = SettingsStore.normalizeObfsMode(store.obfsMode.first())
             val connectionMode = SettingsStore.normalizeConnectionMode(store.connectionMode.first())
             val socksPort = SettingsStore.normalizeSocksPort(store.socksPort.first())
+            val socksAuthEnabled = store.socksAuthEnabled.first()
+            val socksUsername = store.socksUsername.first()
+            val socksPassword = store.socksPassword.first()
             val manualPortsEnabled = store.manualPortsEnabled.first()
             val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
             val peerWithPort = if (basePeer.isBlank()) basePeer else PeerAddress.ensurePort(basePeer, serverDtlsPort)
@@ -57,6 +60,9 @@ object TunnelControl {
                 putExtra("obfs_mode", obfsMode)
                 putExtra("connection_mode", connectionMode)
                 putExtra("socks_port", socksPort)
+                putExtra("socks_auth_enabled", socksAuthEnabled)
+                putExtra("socks_username", socksUsername)
+                putExtra("socks_password", socksPassword)
             }
 
             withContext(Dispatchers.Main) {

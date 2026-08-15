@@ -59,8 +59,16 @@ object TunnelManager {
     private var processStartedAtMs = 0L
     private var lastActiveAtMs = 0L
     private var lastStatsReceivedAtMs = 0L
+    @Volatile private var lastUplinkMb = 0.0
+    @Volatile private var lastDownlinkMb = 0.0
+    @Volatile private var lastUplinkChangedAtMs = 0L
+    @Volatile private var lastDownlinkChangedAtMs = 0L
     private var lastReconnectAtMs = 0L
     private val reconnectMutex = Mutex()
+    @Volatile private var keepWireGuardOnNextConfig = false
+    @Volatile private var preservedWireGuardConfig: String? = null
+    @Volatile
+    private var preserveVpnDuringReconnect = false
 
     private const val STALE_STATS_MS = 90_000L
     private const val HEALTH_CHECK_GRACE_MS = 120_000L
@@ -318,6 +326,9 @@ object TunnelManager {
             processStartedAtMs = 0L
             lastActiveAtMs = 0L
             lastStatsReceivedAtMs = 0L
+            resetTransportTrafficHealth()
+            keepWireGuardOnNextConfig = false
+            preservedWireGuardConfig = null
             activeHashIndex = 0
             lastContext = java.lang.ref.WeakReference(appContext)
             forceRegenerateUA = false
@@ -381,6 +392,16 @@ object TunnelManager {
                 if (params.connectionPassword.isBlank()) {
                     updateLog("password_error", "Ошибка: пароль подключения не указан", 99, true)
                     abortStart(isSwitching, "Пароль не указан")
+                    return@launch
+                }
+                if (
+                    SettingsStore.normalizeConnectionMode(params.connectionMode) == SettingsStore.CONNECTION_MODE_SOCKS &&
+                    params.socksAuthEnabled &&
+                    (params.socksUsername.isBlank() || params.socksPassword.isBlank() ||
+                        params.socksUsername.toByteArray().size > 255 || params.socksPassword.toByteArray().size > 255)
+                ) {
+                    updateLog("socks_auth_error", "Ошибка: заполните корректные логин и пароль SOCKS5", 99, true)
+                    abortStart(isSwitching, "Не заполнены данные авторизации SOCKS5")
                     return@launch
                 }
 
@@ -486,7 +507,15 @@ object TunnelManager {
                         val socks = params.socksListenAddress
                         cmd.add("-socks")
                         cmd.add(socks)
-                        updateLog("conn_mode", "[СЕТЬ] Режим: SOCKS5 ($socks), без VPN", 1, false)
+                        if (params.socksAuthEnabled) {
+                            cmd.add("-socks-auth")
+                            cmd.add("-socks-user")
+                            cmd.add(params.socksUsername)
+                            cmd.add("-socks-pass")
+                            cmd.add(params.socksPassword)
+                        }
+                        val authLabel = if (params.socksAuthEnabled) ", с авторизацией" else ""
+                        updateLog("conn_mode", "[СЕТЬ] Режим: SOCKS5 ($socks$authLabel), без VPN", 1, false)
                     }
                 }
 
@@ -584,7 +613,7 @@ object TunnelManager {
                 throw e
             } catch (e: Exception) {
                 if (isSwitching) {
-                    handleReconnectFailed("Критическая ошибка: ${e.message}")
+                    handleSwitchingStartFailed("Критическая ошибка: ${e.message}")
                 } else {
                     updateLog("critical_start_error", "Критическая ошибка запуска: ${e.message}", 99, true)
                     e.printStackTrace()
@@ -597,7 +626,7 @@ object TunnelManager {
 
     private fun abortStart(isSwitching: Boolean, message: String) {
         if (isSwitching) {
-            handleReconnectFailed(message)
+            handleSwitchingStartFailed(message)
         } else {
             finishConnectingFailed()
         }
@@ -645,6 +674,18 @@ object TunnelManager {
             wgHelper?.stopTunnel()
             stop(force = true)
         }
+    }
+
+    private fun handleSwitchingStartFailed(reason: String) {
+        if (!preserveVpnDuringReconnect) {
+            handleReconnectFailed(reason)
+            return
+        }
+        transportRestartInProgress = false
+        isReconnecting.value = false
+        isConnecting.value = false
+        markRunning(true)
+        updateLog("soft_reconnect_fail", "⚠ Мягкое восстановление не удалось: $reason", 99, true)
     }
 
     @SuppressLint("StaticFieldLeak")
@@ -839,6 +880,17 @@ object TunnelManager {
                                     lastSavedTrafficMb = currentTraffic
                                 }
                             }
+                        }
+
+                        val downlinkMb = Regex("↓\\s*([\\d.,]+)").find(msg)
+                            ?.groupValues?.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
+                        val uplinkMb = Regex("↑\\s*([\\d.,]+)").find(msg)
+                            ?.groupValues?.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
+                        if (downlinkMb != null && uplinkMb != null) {
+                            if (downlinkMb > lastDownlinkMb) lastDownlinkChangedAtMs = now
+                            if (uplinkMb > lastUplinkMb) lastUplinkChangedAtMs = now
+                            lastDownlinkMb = downlinkMb
+                            lastUplinkMb = uplinkMb
                         }
 
                         updateLog("stats", "[СТАТИСТИКА] $msg", 3, false)
@@ -1104,7 +1156,16 @@ object TunnelManager {
                             } else {
                                 scope.launch(Dispatchers.Main) {
                                     try {
-                                        wgHelper?.startTunnel(configStr)
+                                        val keepExisting = keepWireGuardOnNextConfig &&
+                                            preservedWireGuardConfig == configStr &&
+                                            wgHelper?.watchdogState() == WireGuardHelper.WatchdogState.UP
+                                        keepWireGuardOnNextConfig = false
+                                        preservedWireGuardConfig = null
+                                        if (!keepExisting) {
+                                            wgHelper?.startTunnel(configStr)
+                                        } else {
+                                            updateLog("network_wg_kept", "[VPN] WireGuard-интерфейс сохранён при перезапуске транспорта", 1, false)
+                                        }
                                         markConnectionPipelineCompleted(ConnectionStep.VPN)
                                         finishConnectionPipeline()
                                     } catch (e: Exception) {
@@ -1265,8 +1326,8 @@ object TunnelManager {
         }
     }
 
-    fun restartTransport() {
-        reconnectAll("смена сети")
+    fun restartTransport(reason: String = "смена сети", force: Boolean = false) {
+        reconnectAll(reason, force = force, preserveVpn = true)
     }
 
     fun hasRecentTransportActivity(maxAgeMs: Long = 25_000L): Boolean {
@@ -1277,7 +1338,22 @@ object TunnelManager {
             now - lastStatsReceivedAtMs <= maxAgeMs
     }
 
-    fun reconnectAll(reason: String, force: Boolean = false) {
+    fun hasDownlinkTrafficSince(sinceMs: Long): Boolean = lastDownlinkChangedAtMs >= sinceMs
+
+    fun hasHealthyRestartSince(sinceMs: Long, unansweredGraceMs: Long = 10_000L): Boolean {
+        val now = System.currentTimeMillis()
+        val transportReady = running.value &&
+            activeWorkers.value > 0 &&
+            lastActiveAtMs >= sinceMs &&
+            lastStatsReceivedAtMs >= sinceMs
+        if (!transportReady) return false
+        val unansweredTraffic = lastUplinkChangedAtMs >= sinceMs &&
+            lastDownlinkChangedAtMs < lastUplinkChangedAtMs &&
+            now - lastUplinkChangedAtMs >= unansweredGraceMs
+        return !unansweredTraffic
+    }
+
+    fun reconnectAll(reason: String, force: Boolean = false, preserveVpn: Boolean = false) {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
 
@@ -1292,20 +1368,36 @@ object TunnelManager {
 
                 isReconnecting.value = true
                 transportRestartInProgress = true
+                preserveVpnDuringReconnect = preserveVpn
                 updateLog("reconnect", "🔄 Переподключение ($reason)...", 50, false)
                 try {
+                    val previousWireGuardConfig = config.value?.trim()
+                    keepWireGuardOnNextConfig = false
+                    preservedWireGuardConfig = null
                     withContext(Dispatchers.IO) {
                         ensureTransportStopped(params.port)
                         if (params.isRawTunMode) {
-                            RawTunEngine.prepareForReconnect()
+                            if (preserveVpn) {
+                                RawTunEngine.prepareForTransportRestart()
+                            } else {
+                                RawTunEngine.prepareForReconnect()
+                            }
                         } else if (!params.isSocksMode) {
-                            wgHelper?.stopTunnel()
+                            if (preserveVpn) {
+                                keepWireGuardOnNextConfig = true
+                                preservedWireGuardConfig = previousWireGuardConfig
+                            } else {
+                                keepWireGuardOnNextConfig = false
+                                preservedWireGuardConfig = null
+                                wgHelper?.stopTunnel()
+                            }
                         }
                     }
                     activeWorkers.value = 0
                     processStartedAtMs = 0L
                     lastActiveAtMs = 0L
                     lastStatsReceivedAtMs = 0L
+                    resetTransportTrafficHealth()
                     markRunning(false)
                     config.value = null
                     start(context, params, isSwitching = true)
@@ -1320,8 +1412,9 @@ object TunnelManager {
                     transportRestartInProgress = false
                     throw e
                 } catch (e: Exception) {
-                    handleReconnectFailed(e.message ?: e::class.java.simpleName)
+                    handleSwitchingStartFailed(e.message ?: e::class.java.simpleName)
                 } finally {
+                    preserveVpnDuringReconnect = false
                     transportRestartInProgress = false
                     isReconnecting.value = false
                 }
@@ -1336,7 +1429,14 @@ object TunnelManager {
     }
 
     fun resume() {
-        reconnectAll("сеть появилась", force = true)
+        restartTransport("сеть появилась", force = true)
+    }
+
+    private fun resetTransportTrafficHealth() {
+        lastUplinkMb = 0.0
+        lastDownlinkMb = 0.0
+        lastUplinkChangedAtMs = 0L
+        lastDownlinkChangedAtMs = 0L
     }
 
     private suspend fun awaitRawTunReady(timeoutMs: Long = 20_000L) {
@@ -2038,6 +2138,9 @@ data class TunnelParams(
     val obfsMode: String = "audio", // "audio" or "video"
     val connectionMode: String = SettingsStore.CONNECTION_MODE_VPN, // vpn | socks | box
     val socksPort: Int = SettingsStore.DEFAULT_SOCKS_PORT,
+    val socksAuthEnabled: Boolean = false,
+    val socksUsername: String = "",
+    val socksPassword: String = "",
     /** Экспериментально: RTP-obfs AEAD без DTLS. Нужен сервер с -listen-direct, peer уже должен указывать на direct-порт. */
     val noDtls: Boolean = false,
     /** TURN-relay по TCP вместо UDP — обход UDP-душения на некоторых сетях (напр. Ростелеком). */

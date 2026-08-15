@@ -15,6 +15,7 @@ import kotlinx.coroutines.runBlocking
  * отдаётся напрямую в go_client через [TunFdBridge].
  */
 class RawTunVpnService : VpnService() {
+    @Volatile
     private var tunFd: ParcelFileDescriptor? = null
 
     override fun onCreate() {
@@ -244,6 +245,8 @@ class RawTunVpnService : VpnService() {
         runCatching { tunFd?.close() }
         tunFd = null
     }
+
+    fun currentTunFd(): ParcelFileDescriptor? = tunFd
 
     companion object {
         private const val TAG = "RawTunVpnService"

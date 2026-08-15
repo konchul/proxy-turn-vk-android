@@ -179,6 +179,9 @@ func main() {
 	checkHashes := flag.Bool("check-hashes", false, "проверить VK-хеши и выйти")
 	connMode := flag.String("mode", "vpn", "режим клиента (vpn|socks|rawtun)")
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "локальный SOCKS5 (только -mode socks)")
+	socksAuth := flag.Bool("socks-auth", false, "требовать логин и пароль SOCKS5")
+	socksUser := flag.String("socks-user", "", "логин SOCKS5")
+	socksPass := flag.String("socks-pass", "", "пароль SOCKS5")
 	noDTLS := flag.Bool("notls", false, "прямой режим: RTP-obfs AEAD без DTLS поверх TURN (нужен сервер с -listen-direct)")
 	turnTCP := flag.Bool("turn-tcp", false, "соединяться с TURN-relay по TCP вместо UDP (обход UDP-душения на некоторых сетях, напр. Ростелеком)")
 	tunFdSock := flag.String("tun-fd-sock", "", "unix-сокет для получения TUN fd от Android (только -mode rawtun)")
@@ -187,6 +190,14 @@ func main() {
 	activeConnMode := strings.ToLower(strings.TrimSpace(*connMode))
 	if activeConnMode != "socks" && activeConnMode != "rawtun" {
 		activeConnMode = "vpn"
+	}
+	if activeConnMode == "socks" && *socksAuth {
+		if *socksUser == "" || *socksPass == "" {
+			log.Fatal("[SOCKS] Для авторизации нужны логин и пароль")
+		}
+		if len([]byte(*socksUser)) > 255 || len([]byte(*socksPass)) > 255 {
+			log.Fatal("[SOCKS] Логин и пароль должны быть не длиннее 255 байт")
+		}
 	}
 	setupGlobalResolver(*goDNS)
 	activeCaptchaMode := setCaptchaMode(*captchaMode)
@@ -339,6 +350,9 @@ func main() {
 	log.Printf("[КЛИЕНТ] Режим: %s", activeConnMode)
 	if activeConnMode == "socks" {
 		log.Printf("[КЛИЕНТ] SOCKS5: %s", *socksAddr)
+		if *socksAuth {
+			log.Printf("[КЛИЕНТ] SOCKS5: авторизация по логину и паролю включена")
+		}
 	}
 	log.Printf("[КЛИЕНТ] WRAP: %s", wrapStatus)
 	log.Printf("[WRAP] Ключ выведен из пароля, режим RTP AEAD активен")
@@ -446,7 +460,7 @@ func main() {
 					return
 				}
 				defer dev.Close()
-				if err := runSocks5Server(ctx, *socksAddr, tnet); err != nil {
+				if err := runSocks5Server(ctx, *socksAddr, tnet, *socksAuth, *socksUser, *socksPass); err != nil {
 					log.Printf("[SOCKS] Сервер остановлен: %v", err)
 				}
 			}

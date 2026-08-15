@@ -132,6 +132,10 @@ class SettingsStore(context: Context) {
         /** vpn = Android VpnService; socks = локальный SOCKS5 без VPN. */
         private val CONNECTION_MODE = stringPreferencesKey("connection_mode")
         private val SOCKS_PORT = intPreferencesKey("socks_port")
+        private val SOCKS_AUTH_ENABLED = booleanPreferencesKey("socks_auth_enabled")
+        private val SOCKS_USERNAME = stringPreferencesKey("socks_username")
+        private val SOCKS_PASSWORD = stringPreferencesKey("socks_password")
+        private val SOCKS_PASSWORD_ENCRYPTED = stringPreferencesKey("socks_password_encrypted")
         /** -1 = выкл, 0 = при каждом открытии, иначе интервал в часах (6/12/24). */
         private val SUB_AUTO_REFRESH_HOURS = intPreferencesKey("sub_auto_refresh_hours")
 
@@ -420,6 +424,11 @@ class SettingsStore(context: Context) {
     val sortProfilesByPing: Flow<Boolean> = dataStore.data.map { it[SORT_PROFILES_BY_PING] ?: false }
     val connectionMode: Flow<String> = dataStore.data.map { normalizeConnectionMode(it[CONNECTION_MODE]) }
     val socksPort: Flow<Int> = dataStore.data.map { normalizeSocksPort(it[SOCKS_PORT] ?: DEFAULT_SOCKS_PORT) }
+    val socksAuthEnabled: Flow<Boolean> = dataStore.data.map { it[SOCKS_AUTH_ENABLED] ?: false }
+    val socksUsername: Flow<String> = dataStore.data.map { it[SOCKS_USERNAME] ?: "" }
+    val socksPassword: Flow<String> = dataStore.data.map {
+        readSecret(it, SOCKS_PASSWORD_ENCRYPTED, SOCKS_PASSWORD)
+    }
     val subscriptionAutoRefreshHours: Flow<Int> = dataStore.data.map {
         it[SUB_AUTO_REFRESH_HOURS] ?: DEFAULT_SUB_AUTO_REFRESH_HOURS
     }
@@ -442,6 +451,20 @@ class SettingsStore(context: Context) {
 
     suspend fun saveSocksPort(port: Int) {
         dataStore.edit { prefs -> prefs[SOCKS_PORT] = normalizeSocksPort(port) }
+    }
+
+    suspend fun saveSocksAuthEnabled(enabled: Boolean) {
+        dataStore.edit { prefs -> prefs[SOCKS_AUTH_ENABLED] = enabled }
+    }
+
+    suspend fun saveSocksUsername(username: String) {
+        dataStore.edit { prefs -> prefs[SOCKS_USERNAME] = username }
+    }
+
+    suspend fun saveSocksPassword(password: String) {
+        dataStore.edit { prefs ->
+            prefs.putSecret(SOCKS_PASSWORD_ENCRYPTED, SOCKS_PASSWORD, password)
+        }
     }
 
     suspend fun saveConnectionPipelineEnabled(enabled: Boolean) {
@@ -772,6 +795,7 @@ class SettingsStore(context: Context) {
             prefs.migrateSecret(DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD)
             prefs.migrateSecret(DEPLOY_ADMIN_ID_ENCRYPTED, DEPLOY_ADMIN_ID)
             prefs.migrateSecret(DEPLOY_BOT_TOKEN_ENCRYPTED, DEPLOY_BOT_TOKEN)
+            prefs.migrateSecret(SOCKS_PASSWORD_ENCRYPTED, SOCKS_PASSWORD)
         }
     }
 

@@ -92,12 +92,15 @@ func dialIPv4Only(tnet *netstack.Net) func(ctx context.Context, network, addr st
 }
 
 // runSocks5Server serves SOCKS5 TCP CONNECT via WireGuard netstack until ctx is done.
-func runSocks5Server(ctx context.Context, listenAddr string, tnet *netstack.Net) error {
+func runSocks5Server(ctx context.Context, listenAddr string, tnet *netstack.Net, authEnabled bool, username, password string) error {
 	conf := &socks5.Config{
 		Dial:     dialIPv4Only(tnet),
 		Resolver: &netstackNameResolver{tnet: tnet},
 		Rules:    ipv4OnlyRule{},
 		Logger:   log.New(io.Writer(socksLogFilter{}), "", 0),
+	}
+	if authEnabled {
+		conf.Credentials = socks5.StaticCredentials{username: password}
 	}
 	server, err := socks5.New(conf)
 	if err != nil {
