@@ -2574,6 +2574,10 @@ func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "DTLS адрес")
 	listenDirect := flag.String("listen-direct", "", "адрес для клиентов без DTLS (RTP-obfs AEAD напрямую); пусто = выключено")
 	listenRaw := flag.String("listen-raw", "", "адрес для raw-IP клиентов без WireGuard (свой TUN/NAT); пусто = выключено")
+	adminListen := flag.String("admin-listen", "", "HTTPS адрес admin API; пусто = выключено")
+	adminTokenFile := flag.String("admin-token-file", "", "файл токена admin API")
+	adminCert := flag.String("admin-cert", "", "TLS сертификат admin API")
+	adminKey := flag.String("admin-key", "", "TLS ключ admin API")
 	wgPort := flag.Int("wg-port", defaultInternalWGPort, "WireGuard UDP порт")
 	configDir := flag.String("config-dir", "/etc/wdtt", "директория конфигурации")
 	mainPass := flag.String("password", "", "пароль владельца")
@@ -2646,18 +2650,53 @@ func main() {
 	go expiredPasswordJanitor(ctx, wgDev)
 	go botLoop(*botToken, *adminID, wgDev)
 
-	// Запуск HTTP Control API
 	go func() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/api/profile/status", handleAPIProfileStatus)
 		mux.HandleFunc("/api/profile/unbind", handleAPIProfileUnbind)
-		registerAdminAPIRoutes(mux)
 
 		log.Printf("[API] Запуск HTTP API на %s (TCP)...", *listen)
-		if err := http.ListenAndServe(*listen, mux); err != nil {
+		server := &http.Server{
+			Addr:              *listen,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       30 * time.Second,
+			MaxHeaderBytes:    16 << 10,
+		}
+		if err := server.ListenAndServe(); err != nil {
 			log.Printf("[API] [ERR] Ошибка запуска HTTP API: %v", err)
 		}
 	}()
+
+	if *adminListen != "" {
+		tokenBytes, tokenErr := os.ReadFile(*adminTokenFile)
+		if tokenErr != nil || strings.TrimSpace(string(tokenBytes)) == "" {
+			log.Fatalf("[ADMIN API] токен: %v", tokenErr)
+		}
+		if *adminCert == "" || *adminKey == "" {
+			log.Fatal("[ADMIN API] нужны -admin-cert и -admin-key")
+		}
+		setAdminAPIToken(strings.TrimSpace(string(tokenBytes)))
+		go func() {
+			mux := http.NewServeMux()
+			registerAdminAPIRoutes(mux)
+			server := &http.Server{
+				Addr:              *adminListen,
+				Handler:           http.MaxBytesHandler(mux, 64<<10),
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       10 * time.Second,
+				WriteTimeout:      10 * time.Second,
+				IdleTimeout:       30 * time.Second,
+				MaxHeaderBytes:    16 << 10,
+			}
+			log.Printf("[ADMIN API] HTTPS на %s", *adminListen)
+			if err := server.ListenAndServeTLS(*adminCert, *adminKey); err != nil {
+				log.Printf("[ADMIN API] [ERR] %v", err)
+			}
+		}()
+	}
 
 	addr, _ := net.ResolveUDPAddr("udp", *listen)
 	cert, _ := selfsign.GenerateSelfSigned()

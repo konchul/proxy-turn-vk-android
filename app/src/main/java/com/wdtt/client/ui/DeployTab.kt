@@ -51,9 +51,22 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.security.SecureRandom
 import java.util.Properties
 
 private const val CMD_TIMEOUT = 900000L // 15 minutes
+
+private data class DeployResult(
+    val success: Boolean,
+    val adminApiToken: String = "",
+    val adminCertPin: String = "",
+)
+
+private fun generateAdminApiToken(): String {
+    val bytes = ByteArray(32)
+    SecureRandom().nextBytes(bytes)
+    return bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+}
 
 /**
  * Экран деплоя для ОДНОГО сервера — встраивается в ServersTab как
@@ -130,6 +143,8 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
     var manualPorts by remember { mutableStateOf(false) }
     var serverDtlsPort by remember { mutableIntStateOf(56000) }
     var serverWgPort by remember { mutableIntStateOf(56001) }
+    var adminApiToken by remember { mutableStateOf("") }
+    var adminCertPin by remember { mutableStateOf("") }
 
     // Легаси-фолбэк: пока список серверов пуст и форма ещё ни разу не
     // загружала конкретный ManagedServer (новый сервер с нуля) — подхватываем
@@ -206,6 +221,8 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
         dns1 = dns1,
         dns2 = dns2,
         adminPassword = mainPass,
+        adminApiToken = adminApiToken,
+        adminCertPin = adminCertPin,
         dtlsPort = serverDtlsPort,
         wgPort = serverWgPort,
         manualPortsEnabled = manualPorts,
@@ -225,6 +242,8 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
         dns1 = server.dns1
         dns2 = server.dns2
         mainPass = server.adminPassword
+        adminApiToken = server.adminApiToken
+        adminCertPin = server.adminCertPin
         sshPort = server.sshPort
         manualPorts = server.manualPortsEnabled
         serverDtlsPort = server.dtlsPort
@@ -488,7 +507,8 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
                             if (Build.VERSION.SDK_INT >= 26) appContext.startForegroundService(intent)
                             else appContext.startService(intent)
 
-                            val success = performDeploy(
+                            val deployToken = adminApiToken.ifBlank { generateAdminApiToken() }
+                            val result = performDeploy(
                                 context = appContext,
                                 host = ip,
                                 user = effectiveLogin,
@@ -497,6 +517,7 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
                                 mainPass = mainPass,
                                 adminId = adminId,
                                 botToken = botToken,
+                                adminApiToken = deployToken,
                                 dtlsPort = effectiveDtlsPort,
                                 wgPort = effectiveWgPort,
                                 directPort = effectiveDirectPort,
@@ -505,7 +526,29 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
                                 dns2 = dns2,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
                             )
-                            if (success) {
+                            if (result.success) {
+                                adminApiToken = result.adminApiToken
+                                adminCertPin = result.adminCertPin
+                                val savedId = selectedServerId
+                                if (savedId != null) {
+                                    val existing = serversStore.getServerOnce(savedId)
+                                    if (existing != null) {
+                                        serversStore.updateServer(
+                                            existing.copy(
+                                                adminApiToken = result.adminApiToken,
+                                                adminCertPin = result.adminCertPin,
+                                            )
+                                        )
+                                    }
+                                } else {
+                                    val saved = serversStore.addServer(
+                                        currentFormAsServer(null, ip).copy(
+                                            adminApiToken = result.adminApiToken,
+                                            adminCertPin = result.adminCertPin,
+                                        )
+                                    )
+                                    selectedServerId = saved.id
+                                }
                                 successCountdown = 5
                                 showSuccessBanner = true
                             }
@@ -1278,10 +1321,12 @@ private suspend fun performDeploy(
     host: String, user: String, port: Int,
     sshAuth: SshAuth,
     mainPass: String, adminId: String, botToken: String,
+    adminApiToken: String,
     dtlsPort: Int, wgPort: Int, directPort: Int?, rawPort: Int?, dns1: String, dns2: String,
     onProgress: (Float, String) -> Unit
-): Boolean = withContext(Dispatchers.IO) {
+): DeployResult = withContext(Dispatchers.IO) {
     var session: Session? = null
+    val adminTokenFile = File(context.cacheDir, "wdtt-admin.token")
     try {
         onProgress(0.02f, "Подключение...")
         session = createSSHSession(host, user, port, sshAuth)
@@ -1300,52 +1345,61 @@ private suspend fun performDeploy(
         try {
             context.assets.open("deploy.sh").use { inp -> FileOutputStream(scriptFile).use { out -> inp.copyTo(out) } }
             context.assets.open("server").use { inp -> FileOutputStream(serverFile).use { out -> inp.copyTo(out) } }
+            FileOutputStream(adminTokenFile).use { it.write(adminApiToken.toByteArray(Charsets.UTF_8)) }
         } catch (e: Exception) {
             DeployManager.writeError("Assets extraction failed: ${e.message}")
             DeployManager.stopDeploy("Ошибка: файлы не найдены в assets")
-            return@withContext false
+            return@withContext DeployResult(false)
         }
         if (isUnsafeLegacyServerAsset(serverFile)) {
             scriptFile.delete()
             serverFile.delete()
             DeployManager.writeError("Unsafe legacy server asset: найдено wg0 или /etc/wireguard. Нужна пересборка server под wdtt0 и /etc/wdtt.")
             DeployManager.stopDeploy("Нужна пересборка server asset")
-            return@withContext false
+            return@withContext DeployResult(false)
         }
 
         onProgress(0.06f, "Загрузка на сервер...")
         ssh.upload(scriptFile, "/tmp/deploy.sh")
         ssh.upload(serverFile, "/tmp/wdtt-server")
+        ssh.upload(adminTokenFile, "/tmp/wdtt-admin.token")
         scriptFile.delete()
         serverFile.delete()
+        adminTokenFile.delete()
 
         onProgress(0.08f, "Установка...")
         val directPortEnv = if (directPort != null) "WDTT_DIRECT_PORT=$directPort " else ""
         val rawPortEnv = if (rawPort != null) "WDTT_RAW_PORT=$rawPort " else ""
         val output = ssh.exec(
-            rootCommand("env WDTT_ARGS=${shellQuote(args)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port ${directPortEnv}${rawPortEnv}bash /tmp/deploy.sh"),
+            rootCommand("chmod 600 /tmp/wdtt-admin.token && env WDTT_ARGS=${shellQuote(args)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port ${directPortEnv}${rawPortEnv}bash /tmp/deploy.sh"),
             timeout = CMD_TIMEOUT
         )
+        val certPin = Regex("WDTT_ADMIN_PIN\\|(sha256/[A-Za-z0-9+/=]+)")
+            .find(output)
+            ?.groupValues
+            ?.getOrNull(1)
+            .orEmpty()
 
-        if (output.contains("✅") || output.contains("Деплой успешно") || output.contains("active")) {
+        if ((output.contains("✅") || output.contains("Деплой успешно") || output.contains("active")) && certPin.isNotBlank()) {
             DeployManager.stopDeploy("success")
             TunnelManager.addDeploySuccessLog("Деплой успешно завершен. Сервис активен.")
-            return@withContext true
+            return@withContext DeployResult(true, adminApiToken, certPin)
         } else if (output.contains("error:")) {
             DeployManager.writeError("Deploy script output contains error")
             DeployManager.stopDeploy("Ошибка выполнения скрипта (см. errors.log)")
-            return@withContext false
+            return@withContext DeployResult(false)
         } else {
-            DeployManager.stopDeploy("success")
-            TunnelManager.addDeploySuccessLog("Деплой завершён. (Проверьте подключение)")
-            return@withContext true
+            DeployManager.writeError("Admin TLS pin not found in deploy output")
+            DeployManager.stopDeploy("Ошибка настройки защищённой админ-панели")
+            return@withContext DeployResult(false)
         }
 
     } catch (e: Exception) {
         DeployManager.writeError("Deploy critical: ${e.message}\n${e.stackTraceToString().take(500)}")
         DeployManager.stopDeploy("Ошибка: ${e.message?.take(100)}")
-        return@withContext false
+        return@withContext DeployResult(false)
     } finally {
+        adminTokenFile.delete()
         try { session?.disconnect() } catch (_: Exception) {}
         DeployManager.activeSession = null
     }
@@ -1391,7 +1445,8 @@ internal suspend fun performMultiDeploy(
                 privateKey = server.sshPrivateKey,
                 keyPassphrase = server.sshKeyPassphrase,
             )
-            val success = performDeploy(
+            val deployToken = server.adminApiToken.ifBlank { generateAdminApiToken() }
+            val result = performDeploy(
                 context = context,
                 host = server.ip,
                 user = effectiveLogin,
@@ -1400,6 +1455,7 @@ internal suspend fun performMultiDeploy(
                 mainPass = server.adminPassword,
                 adminId = "",
                 botToken = "",
+                adminApiToken = deployToken,
                 dtlsPort = effectiveDtlsPort,
                 wgPort = effectiveWgPort,
                 directPort = effectiveDirectPort,
@@ -1408,7 +1464,15 @@ internal suspend fun performMultiDeploy(
                 dns2 = server.dns2,
                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
             )
-            onServerFinished(server.id, if (success) DeployOutcome.Success else DeployOutcome.Failed("Ошибка деплоя"))
+            if (result.success) {
+                ServersStore(context).updateServer(
+                    server.copy(
+                        adminApiToken = result.adminApiToken,
+                        adminCertPin = result.adminCertPin,
+                    )
+                )
+            }
+            onServerFinished(server.id, if (result.success) DeployOutcome.Success else DeployOutcome.Failed("Ошибка деплоя"))
         } catch (e: Exception) {
             onServerFinished(server.id, DeployOutcome.Failed(e.message ?: "Ошибка"))
         }
@@ -1460,6 +1524,7 @@ private suspend fun performUninstall(
                     "iptables -D INPUT -p udp --dport $wgPort -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
                     "iptables -D INPUT -p udp --dport 56000 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
                     "iptables -D INPUT -p udp --dport 56001 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
+                    "iptables -D INPUT -p tcp --dport 56002 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
                     "iptables -D INPUT -p tcp --dport $port -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
                     "iptables -D INPUT -p tcp --dport 22 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +
                     "iptables -D FORWARD -i wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT 2>/dev/null || true; " +

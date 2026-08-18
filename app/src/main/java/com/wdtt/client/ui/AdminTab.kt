@@ -83,17 +83,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * Управление паролями/устройствами прямо в приложении — то же самое, что
- * умеет Telegram-бот (/new, /list, деактивация, удаление), только через
- * admin HTTP API сервера (см. server.go/admin_api.go). Доступно только в
- * admin-режиме интерфейса, как и вкладка "Серверы" — фильтрация в
- * MainActivity.kt. Встраивается в ServersTab как экран AccessList(serverId) —
- * сервер уже выбран на предыдущем экране (список серверов), так что здесь
- * больше нет собственного chip-переключателя серверов и легаси-фолбэка на
- * одиночные SettingsStore.deploy* поля — их роль теперь играет параметр
- * server, разрешённый ServersTab.kt из ServersStore.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccessListScreen(server: ManagedServer, onBack: () -> Unit) {
@@ -101,8 +90,11 @@ fun AccessListScreen(server: ManagedServer, onBack: () -> Unit) {
     val clipboard = LocalClipboardManager.current
 
     val deployIp = server.ip
-    val deployMainPassword = server.adminPassword
-    val serverPort = if (server.manualPortsEnabled) server.dtlsPort else 56000
+    val deployMainPassword = server.adminApiToken
+    val serverPort = 56002
+    val adminCertPin = server.adminCertPin
+
+    AdminApiClient.configureServer(deployIp, adminCertPin)
 
     var passwords by remember { mutableStateOf<List<AdminApiClient.AdminPassword>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
@@ -124,7 +116,7 @@ fun AccessListScreen(server: ManagedServer, onBack: () -> Unit) {
     }
 
     fun refresh() {
-        if (deployIp.isBlank() || deployMainPassword.isBlank()) return
+        if (deployIp.isBlank() || deployMainPassword.isBlank() || adminCertPin.isBlank()) return
         isLoading = true
         errorMessage = null
         scope.launch {
@@ -141,12 +133,12 @@ fun AccessListScreen(server: ManagedServer, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(deployIp, deployMainPassword, serverPort) {
+    LaunchedEffect(deployIp, deployMainPassword, adminCertPin, serverPort) {
         refresh()
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        if (deployIp.isBlank() || deployMainPassword.isBlank()) {
+        if (deployIp.isBlank() || deployMainPassword.isBlank() || adminCertPin.isBlank()) {
             Box(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
                 contentAlignment = Alignment.Center,
@@ -163,7 +155,7 @@ fun AccessListScreen(server: ManagedServer, onBack: () -> Unit) {
                     )
                     Spacer(modifier = Modifier.height(24.dp))
                     Text(
-                        "У этого сервера ещё не заполнены IP и пароль владельца — откройте деплой сервера",
+                        "Для этого сервера ещё не настроена защищённая админ-панель — обновите сервер через деплой",
                         style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center,

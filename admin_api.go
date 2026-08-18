@@ -1,33 +1,84 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
-// ==================== Admin HTTP API ====================
-//
-// То же самое управление паролями/устройствами, что уже умеет Telegram-бот
-// (/new, /list, деактивация, удаление) — здесь просто второй клиент той же
-// логики (db.Passwords, generatePassword, wgDev.IpcSet и т.д.), поверх HTTP
-// вместо long-polling Telegram API. Бот при этом продолжает работать как
-// раньше, ничего в его коде не меняется.
-//
-// Аутентификация — deploy-пароль владельца (db.MainPassword), тот же самый,
-// что используется для SSH-деплоя сервера. Передаётся в заголовке
-// X-Admin-Password на каждый запрос.
+var adminTokenHash [32]byte
+var adminTokenReady bool
+var adminTokenMu sync.RWMutex
+
+type adminAuthAttempt struct {
+	count       int
+	windowStart time.Time
+	blockedTill time.Time
+}
+
+var adminAuthMu sync.Mutex
+var adminAuthAttempts = map[string]adminAuthAttempt{}
+
+func setAdminAPIToken(token string) {
+	adminTokenMu.Lock()
+	adminTokenHash = sha256.Sum256([]byte(token))
+	adminTokenReady = token != ""
+	adminTokenMu.Unlock()
+}
 
 func adminAuthorized(r *http.Request) bool {
-	pass := r.Header.Get("X-Admin-Password")
-	if pass == "" {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	now := time.Now()
+	adminAuthMu.Lock()
+	attempt := adminAuthAttempts[host]
+	if now.Before(attempt.blockedTill) {
+		adminAuthMu.Unlock()
 		return false
 	}
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-	return db.MainPassword != "" && pass == db.MainPassword
+	adminAuthMu.Unlock()
+
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		recordAdminAuthFailure(host, now)
+		return false
+	}
+	tokenHash := sha256.Sum256([]byte(strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))))
+	adminTokenMu.RLock()
+	ready := adminTokenReady
+	expected := adminTokenHash
+	adminTokenMu.RUnlock()
+	if !ready || subtle.ConstantTimeCompare(tokenHash[:], expected[:]) != 1 {
+		recordAdminAuthFailure(host, now)
+		return false
+	}
+	adminAuthMu.Lock()
+	delete(adminAuthAttempts, host)
+	adminAuthMu.Unlock()
+	return true
+}
+
+func recordAdminAuthFailure(host string, now time.Time) {
+	adminAuthMu.Lock()
+	attempt := adminAuthAttempts[host]
+	if attempt.windowStart.IsZero() || now.Sub(attempt.windowStart) > time.Minute {
+		attempt = adminAuthAttempt{windowStart: now}
+	}
+	attempt.count++
+	if attempt.count >= 5 {
+		attempt.blockedTill = now.Add(5 * time.Minute)
+	}
+	adminAuthAttempts[host] = attempt
+	adminAuthMu.Unlock()
 }
 
 func writeAdminJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -41,9 +92,9 @@ func writeAdminError(w http.ResponseWriter, status int, msg string) {
 }
 
 func setAdminCORSHeaders(w http.ResponseWriter, methods string) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", methods+", OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Password")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Cache-Control", "no-store")
 }
 
 type adminPasswordView struct {

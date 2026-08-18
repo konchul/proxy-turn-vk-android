@@ -1,5 +1,6 @@
 package com.wdtt.client
 
+import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -7,14 +8,14 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
 
-/**
- * Клиент к admin HTTP API сервера (см. server.go/admin_api.go, /admin/passwords...) —
- * то же управление паролями/устройствами, что уже умеет Telegram-бот, просто
- * второй способ дёрнуть ту же логику. Авторизация — deploy-пароль владельца
- * (X-Admin-Password), тот же что и для SSH-деплоя.
- */
 object AdminApiClient {
 
     data class AdminPassword(
@@ -36,13 +37,55 @@ object AdminApiClient {
         data class Failure(val message: String) : Result<Nothing>()
     }
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .writeTimeout(8, TimeUnit.SECONDS)
-        .build()
+    private val pins = ConcurrentHashMap<String, String>()
+    private val clients = ConcurrentHashMap<String, OkHttpClient>()
 
-    private fun baseUrl(host: String, port: Int): String = "http://$host:$port"
+    fun configureServer(host: String, certPin: String) {
+        pins[host.trim().lowercase()] = certPin.trim()
+    }
+
+    private fun clientForHost(host: String): OkHttpClient {
+        val key = host.trim().lowercase()
+        val pin = pins[key].orEmpty()
+        require(pin.startsWith("sha256/") && pin.length > 10) { "Сертификат админ-панели не сохранён. Обновите сервер." }
+        val cacheKey = "$key|$pin"
+        return clients.getOrPut(cacheKey) {
+            val expected = Base64.decode(pin.removePrefix("sha256/"), Base64.DEFAULT)
+            val trustManager = object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                    throw CertificateException("Client certificates are not accepted")
+                }
+
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                    val certificate = chain?.firstOrNull() ?: throw CertificateException("Server certificate is missing")
+                    val actual = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
+                    if (!MessageDigest.isEqual(expected, actual)) {
+                        throw CertificateException("Server certificate does not match saved fingerprint")
+                    }
+                }
+
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            }
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, arrayOf(trustManager), null)
+            OkHttpClient.Builder()
+                .sslSocketFactory(sslContext.socketFactory, trustManager)
+                .hostnameVerifier { _, _ -> true }
+                .connectTimeout(8, TimeUnit.SECONDS)
+                .readTimeout(8, TimeUnit.SECONDS)
+                .writeTimeout(8, TimeUnit.SECONDS)
+                .build()
+        }
+    }
+
+    private fun baseUrl(host: String, port: Int): String {
+        val value = host.trim()
+        val safeHost = if (value.contains(':') && !value.startsWith('[')) "[$value]" else value
+        return "https://$safeHost:$port"
+    }
+
+    private fun Request.Builder.authorize(token: String): Request.Builder =
+        header("Authorization", "Bearer $token")
 
     private fun Exception.readableMessage(): String {
         val text = message
@@ -82,10 +125,10 @@ object AdminApiClient {
             try {
                 val request = Request.Builder()
                     .url("${baseUrl(host, port)}/admin/passwords")
-                    .header("X-Admin-Password", adminPassword)
+                    .authorize(adminPassword)
                     .get()
                     .build()
-                client.newCall(request).execute().use { resp ->
+                clientForHost(host).newCall(request).execute().use { resp ->
                     val text = resp.body?.string()
                     if (!resp.isSuccessful) {
                         return@withContext Result.Failure(errorMessage(text, "HTTP ${resp.code}"))
@@ -116,10 +159,10 @@ object AdminApiClient {
             if (label.isNotBlank()) formBuilder.add("label", label)
             val request = Request.Builder()
                 .url("${baseUrl(host, port)}/admin/passwords")
-                .header("X-Admin-Password", adminPassword)
+                .authorize(adminPassword)
                 .post(formBuilder.build())
                 .build()
-            client.newCall(request).execute().use { resp ->
+            clientForHost(host).newCall(request).execute().use { resp ->
                 val text = resp.body?.string()
                 if (!resp.isSuccessful) {
                     return@withContext Result.Failure(errorMessage(text, "HTTP ${resp.code}"))
@@ -154,10 +197,10 @@ object AdminApiClient {
             days?.let { formBuilder.add("days", it.toString()) }
             val request = Request.Builder()
                 .url("${baseUrl(host, port)}/admin/passwords/update")
-                .header("X-Admin-Password", adminPassword)
+                .authorize(adminPassword)
                 .post(formBuilder.build())
                 .build()
-            client.newCall(request).execute().use { resp ->
+            clientForHost(host).newCall(request).execute().use { resp ->
                 val text = resp.body?.string()
                 if (!resp.isSuccessful) {
                     return@withContext Result.Failure(errorMessage(text, "HTTP ${resp.code}"))
@@ -180,10 +223,10 @@ object AdminApiClient {
             val formBody = FormBody.Builder().add("password", password).build()
             val request = Request.Builder()
                 .url("${baseUrl(host, port)}$path")
-                .header("X-Admin-Password", adminPassword)
+                .authorize(adminPassword)
                 .post(formBody)
                 .build()
-            client.newCall(request).execute().use { resp ->
+            clientForHost(host).newCall(request).execute().use { resp ->
                 val text = resp.body?.string()
                 if (!resp.isSuccessful) {
                     return@withContext Result.Failure(errorMessage(text, "HTTP ${resp.code}"))
@@ -219,10 +262,10 @@ object AdminApiClient {
                 .build()
             val request = Request.Builder()
                 .url("${baseUrl(host, port)}/admin/passwords/unbind-device")
-                .header("X-Admin-Password", adminPassword)
+                .authorize(adminPassword)
                 .post(formBody)
                 .build()
-            client.newCall(request).execute().use { resp ->
+            clientForHost(host).newCall(request).execute().use { resp ->
                 val text = resp.body?.string()
                 if (!resp.isSuccessful) {
                     return@withContext Result.Failure(errorMessage(text, "HTTP ${resp.code}"))
@@ -240,10 +283,10 @@ object AdminApiClient {
                 val formBody = FormBody.Builder().add("password", password).build()
                 val request = Request.Builder()
                     .url("${baseUrl(host, port)}/admin/passwords/delete")
-                    .header("X-Admin-Password", adminPassword)
+                    .authorize(adminPassword)
                     .post(formBody)
                     .build()
-                client.newCall(request).execute().use { resp ->
+                clientForHost(host).newCall(request).execute().use { resp ->
                     val text = resp.body?.string()
                     if (!resp.isSuccessful) {
                         return@withContext Result.Failure(errorMessage(text, "HTTP ${resp.code}"))

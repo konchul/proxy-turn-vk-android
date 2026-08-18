@@ -38,6 +38,8 @@ data class ManagedServer(
     val dns1: String,
     val dns2: String,
     val adminPassword: String,
+    val adminApiToken: String = "",
+    val adminCertPin: String = "",
     val dtlsPort: Int = 56000,
     val wgPort: Int = 56001,
     val manualPortsEnabled: Boolean = false,
@@ -73,6 +75,8 @@ class ServersStore(context: Context) {
         private fun dns1Key(id: String) = stringPreferencesKey("server_dns1_$id")
         private fun dns2Key(id: String) = stringPreferencesKey("server_dns2_$id")
         private fun adminPasswordEncKey(id: String) = stringPreferencesKey("server_admin_password_enc_$id")
+        private fun adminApiTokenEncKey(id: String) = stringPreferencesKey("server_admin_api_token_enc_$id")
+        private fun adminCertPinKey(id: String) = stringPreferencesKey("server_admin_cert_pin_$id")
         private fun dtlsPortKey(id: String) = intPreferencesKey("server_dtls_port_$id")
         private fun wgPortKey(id: String) = intPreferencesKey("server_wg_port_$id")
         private fun manualPortsKey(id: String) = booleanPreferencesKey("server_manual_ports_$id")
@@ -108,6 +112,8 @@ class ServersStore(context: Context) {
             dns1 = prefs[dns1Key(id)] ?: "1.1.1.1",
             dns2 = prefs[dns2Key(id)] ?: "1.0.0.1",
             adminPassword = secureStore.decrypt(prefs[adminPasswordEncKey(id)]) ?: "",
+            adminApiToken = secureStore.decrypt(prefs[adminApiTokenEncKey(id)]) ?: "",
+            adminCertPin = prefs[adminCertPinKey(id)] ?: "",
             dtlsPort = prefs[dtlsPortKey(id)] ?: 56000,
             wgPort = prefs[wgPortKey(id)] ?: 56001,
             manualPortsEnabled = prefs[manualPortsKey(id)] ?: false,
@@ -151,6 +157,8 @@ class ServersStore(context: Context) {
             prefs[dns1Key(server.id)] = server.dns1
             prefs[dns2Key(server.id)] = server.dns2
             prefs[adminPasswordEncKey(server.id)] = secureStore.encrypt(server.adminPassword)
+            prefs[adminApiTokenEncKey(server.id)] = secureStore.encrypt(server.adminApiToken)
+            prefs[adminCertPinKey(server.id)] = server.adminCertPin
             prefs[dtlsPortKey(server.id)] = server.dtlsPort
             prefs[wgPortKey(server.id)] = server.wgPort
             prefs[manualPortsKey(server.id)] = server.manualPortsEnabled
@@ -175,6 +183,8 @@ class ServersStore(context: Context) {
             prefs.remove(dns1Key(id))
             prefs.remove(dns2Key(id))
             prefs.remove(adminPasswordEncKey(id))
+            prefs.remove(adminApiTokenEncKey(id))
+            prefs.remove(adminCertPinKey(id))
             prefs.remove(dtlsPortKey(id))
             prefs.remove(wgPortKey(id))
             prefs.remove(manualPortsKey(id))
