@@ -13,10 +13,7 @@ import (
 
 const workersPerGroup = 9
 
-// allocateGateInterval — минимальный интервал между TURN Allocate-запросами
-// внутри одной группы воркеров (см. комментарий у allocateTicker в
-// WorkerGroup). Тот же порядок величины, что у free-turn-proxy (200ms).
-const allocateGateInterval = 200 * time.Millisecond
+const allocateGateInterval = 100 * time.Millisecond
 
 // WorkerGroup:
 // Запускает 9 потоков с одними кредами. Ротации нет — работает до смерти воркеров.
@@ -117,7 +114,7 @@ func WorkerGroup(
 	// Сигнализируем следующей группе, что мы успешно запустились (креды получены + фора)
 	if signalReady != nil {
 		go func() {
-			delayMs := 1000 + rand.Intn(500)
+			delayMs := 500 + rand.Intn(250)
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
 			close(signalReady)
 			log.Printf("[ГРУППА #%d] Успешный старт! Передача эстафеты следующей группе...", groupID)
@@ -138,8 +135,7 @@ func WorkerGroup(
 	for i, wid := range workerIDs {
 		wg.Add(1)
 
-		// Stagger: 200мс между воркерами
-		workerDelay := time.Duration(i) * 200 * time.Millisecond
+		workerDelay := time.Duration(i) * 75 * time.Millisecond
 
 		go func(wid int, delay time.Duration) {
 			defer wg.Done()
