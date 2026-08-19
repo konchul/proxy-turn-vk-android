@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-
 const workersPerGroup = 9
 
 // allocateGateInterval — минимальный интервал между TURN Allocate-запросами
@@ -179,6 +178,7 @@ func WorkerGroup(
 					getConf, cc, wid, &credsSnapshot, deviceID, password, stats, allocateTicker.C)
 
 				quotaRetry := false
+				fastRetry := false
 				if getConf {
 					if configDelivered {
 						atomic.StoreInt32(&configSent, 1)
@@ -193,6 +193,9 @@ func WorkerGroup(
 					}
 					errStr := sessErr.Error()
 					errStrLower := strings.ToLower(errStr)
+					fastRetry = strings.Contains(errStrLower, "broken pipe") ||
+						strings.Contains(errStrLower, "connection reset by peer") ||
+						strings.Contains(errStrLower, "unexpected eof")
 
 					turnAllocAttrMissing := strings.Contains(errStrLower, "turn allocate") &&
 						strings.Contains(errStrLower, "attribute not found")
@@ -250,6 +253,8 @@ func WorkerGroup(
 				retryDelay := time.Duration(5+rand.Intn(11)) * time.Second
 				if quotaRetry {
 					retryDelay = time.Duration(30+rand.Intn(31)) * time.Second
+				} else if fastRetry {
+					retryDelay = time.Duration(1+rand.Intn(3)) * time.Second
 				}
 				select {
 				case <-time.After(retryDelay):
@@ -304,10 +309,10 @@ func normalizeVKJoinHash(input string) string {
 
 // TurnParams — конфигурация TURN
 type TurnParams struct {
-	Host    string
-	Port    string
-	Hashes  []string
-	WrapKey []byte // Password-derived WRAP key (32 bytes), nil = disabled
+	Host     string
+	Port     string
+	Hashes   []string
+	WrapKey  []byte // Password-derived WRAP key (32 bytes), nil = disabled
 	ObfsMode string // "audio" or "video" — RTP masking mode
 	// NoDTLS: пропустить DTLS и идти RTP-obfs AEAD напрямую поверх TURN relay.
 	// Требует сервер, который умеет принимать прямые (без DTLS) сессии на
@@ -330,5 +335,3 @@ type Credentials struct {
 	TurnURLs      []string
 	CacheStreamID int
 }
-
-

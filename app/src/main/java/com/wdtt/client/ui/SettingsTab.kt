@@ -2006,14 +2006,6 @@ fun SettingsTabContent(
                     modifier = Modifier.weight(1f)
                 )
             }
-            if (connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN) {
-                Text(
-                    "Raw несовместим со старыми серверами — если не подключается, используйте WG.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),

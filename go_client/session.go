@@ -510,6 +510,7 @@ func RunSession(
 	// Proxy activeConn ↔ Dispatcher
 	var proxyWg sync.WaitGroup
 	proxyWg.Add(3) // +1 for keepalive goroutine
+	sessionErrCh := make(chan error, 1)
 
 	stopConn := context.AfterFunc(sessCtx, func() {
 		_ = activeConn.SetDeadline(time.Now())
@@ -622,6 +623,10 @@ func RunSession(
 			putPktBuf(pkt)
 			if writeErr != nil {
 				log.Printf("[ВОРКЕР #%d] Ошибка Writer: %v", sessionID, writeErr)
+				select {
+				case sessionErrCh <- fmt.Errorf("transport writer: %w", writeErr):
+				default:
+				}
 				return
 			}
 		}
@@ -643,6 +648,10 @@ func RunSession(
 					continue
 				}
 				log.Printf("[ВОРКЕР #%d] Ошибка Reader: %v", sessionID, readErr)
+				select {
+				case sessionErrCh <- fmt.Errorf("transport reader: %w", readErr):
+				default:
+				}
 				return
 			}
 
@@ -683,6 +692,11 @@ func RunSession(
 	relayWg.Wait()
 	sessionWg.Wait()
 	log.Printf("[СЕССИЯ #%d] Завершена", sessionID)
+	select {
+	case sessionErr := <-sessionErrCh:
+		return configDelivered, sessionErr
+	default:
+	}
 	return configDelivered, nil
 }
 
