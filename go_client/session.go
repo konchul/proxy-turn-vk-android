@@ -54,6 +54,7 @@ type obfsDirectConn struct {
 	wrapKey    []byte
 	cfg        *ObfsConfig
 	writeState *ObfsState
+	replay     replayWindow
 }
 
 func (c *obfsDirectConn) Read(b []byte) (int, error) {
@@ -68,6 +69,9 @@ func (c *obfsDirectConn) Read(b []byte) (int, error) {
 		}
 		m, unwrapErr := obfsUnwrapPacket(c.wrapKey, wire[:n], b)
 		if unwrapErr != nil {
+			continue
+		}
+		if !c.replay.accept(wire[:n]) {
 			continue
 		}
 		return m, nil
@@ -330,6 +334,7 @@ func RunSession(
 			readBufLen := readBufSize + 80
 			buf := make([]byte, readBufLen)
 			plain := make([]byte, readBufSize)
+			var replay replayWindow
 			for {
 				n, _, readErr := relay.ReadFrom(buf)
 				if readErr != nil {
@@ -344,6 +349,9 @@ func RunSession(
 					m, wrapErr := obfsUnwrapPacket(tp.WrapKey, payload, plain)
 					if wrapErr != nil {
 						log.Printf("[СЕССИЯ #%d] OBFS unwrap: %v (n=%d)", sessionID, wrapErr, n)
+						continue
+					}
+					if !replay.accept(payload) {
 						continue
 					}
 					payload = plain[:m]
@@ -765,6 +773,7 @@ func RunPing(
 		defer sessCancel()
 		buf := make([]byte, readBufSize+80)
 		plain := make([]byte, readBufSize)
+		var replay replayWindow
 		for {
 			n, _, err := relay.ReadFrom(buf)
 			if err != nil {
@@ -777,6 +786,9 @@ func RunPing(
 				}
 				m, err := obfsUnwrapPacket(tp.WrapKey, payload, plain)
 				if err != nil {
+					continue
+				}
+				if !replay.accept(payload) {
 					continue
 				}
 				payload = plain[:m]

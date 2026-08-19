@@ -51,6 +51,9 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.security.MessageDigest
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import com.wdtt.client.SettingsStore
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
@@ -2148,17 +2151,21 @@ private suspend fun fetchProfileStatus(
     password: String,
     deviceId: String
 ): ProfileDeviceStatus? = withContext(Dispatchers.IO) {
-    var conn: HttpURLConnection? = null
-    try {
-        val encodedPass = URLEncoder.encode(password, "UTF-8")
-        val encodedDevice = URLEncoder.encode(deviceId, "UTF-8")
-        val url = URL("http://${PeerAddress.httpEndpoint(peer, dtlsPort)}/api/profile/status?password=$encodedPass&device_id=$encodedDevice")
-        conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.connectTimeout = 4000
-        conn.readTimeout = 4000
-        conn.useCaches = false
-        conn.setRequestProperty("Accept", "application/json")
+	var conn: HttpURLConnection? = null
+	try {
+		val endpoint = "http://${PeerAddress.httpEndpoint(peer, dtlsPort)}"
+		val nonce = requestProfileChallenge(endpoint) ?: return@withContext null
+		val url = URL("$endpoint/api/profile/status")
+		conn = url.openConnection() as HttpURLConnection
+		conn.requestMethod = "POST"
+		conn.connectTimeout = 4000
+		conn.readTimeout = 4000
+		conn.useCaches = false
+		conn.doOutput = true
+		conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+		conn.setRequestProperty("Accept", "application/json")
+		val postData = profileProofBody("status", password, deviceId, nonce)
+		conn.outputStream.use { it.write(postData.toByteArray(Charsets.UTF_8)) }
 
         val responseCode = conn.responseCode
         if (responseCode == 200) {
@@ -2189,8 +2196,10 @@ private suspend fun sendUnbindRequest(
     deviceId: String
 ): Boolean = withContext(Dispatchers.IO) {
     var conn: HttpURLConnection? = null
-    try {
-        val url = URL("http://${PeerAddress.httpEndpoint(peer, dtlsPort)}/api/profile/unbind")
+	try {
+		val endpoint = "http://${PeerAddress.httpEndpoint(peer, dtlsPort)}"
+		val nonce = requestProfileChallenge(endpoint) ?: return@withContext false
+		val url = URL("$endpoint/api/profile/unbind")
         conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.connectTimeout = 4000
@@ -2198,7 +2207,7 @@ private suspend fun sendUnbindRequest(
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
 
-        val postData = "password=${URLEncoder.encode(password, "UTF-8")}&device_id=${URLEncoder.encode(deviceId, "UTF-8")}"
+		val postData = profileProofBody("unbind", password, deviceId, nonce)
         conn.outputStream.use { os ->
             os.write(postData.toByteArray(Charsets.UTF_8))
         }
@@ -2210,7 +2219,38 @@ private suspend fun sendUnbindRequest(
         false
     } finally {
         conn?.disconnect()
-    }
+	}
+}
+
+private fun requestProfileChallenge(endpoint: String): String? {
+	var conn: HttpURLConnection? = null
+	return try {
+		conn = URL("$endpoint/api/profile/challenge").openConnection() as HttpURLConnection
+		conn.requestMethod = "POST"
+		conn.connectTimeout = 4000
+		conn.readTimeout = 4000
+		conn.doOutput = true
+		conn.outputStream.use { it.write(ByteArray(0)) }
+		if (conn.responseCode != 200) null
+		else JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).optString("nonce").takeIf { it.isNotBlank() }
+	} catch (_: Exception) {
+		null
+	} finally {
+		conn?.disconnect()
+	}
+}
+
+private fun profileProofBody(action: String, password: String, deviceId: String, nonce: String): String {
+	val idHash = MessageDigest.getInstance("SHA-256")
+		.digest(("WDTT-PROFILE-ID-v1\u0000" + password).toByteArray(Charsets.UTF_8))
+	val keyId = idHash.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+	val mac = Mac.getInstance("HmacSHA256")
+	mac.init(SecretKeySpec(password.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+	val proof = mac.doFinal("$action\n$deviceId\n$nonce".toByteArray(Charsets.UTF_8))
+		.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+	return "device_id=${URLEncoder.encode(deviceId, "UTF-8")}" +
+		"&nonce=${URLEncoder.encode(nonce, "UTF-8")}" +
+		"&key_id=$keyId&proof=$proof"
 }
 
 fun getCountryFlag(profileName: String): String {

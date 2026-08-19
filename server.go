@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -81,7 +82,8 @@ type ClientDevice struct {
 	UpBytes   int64  `json:"up_bytes"`   // отдано устройством
 	// RawIP — адрес в raw-IP (без WireGuard) роутере. Пусто у старых записей —
 	// назначается лениво при первом подключении в raw-режиме.
-	RawIP string `json:"raw_ip,omitempty"`
+	RawIP      string `json:"raw_ip,omitempty"`
+	RawOwnerID string `json:"raw_owner_id,omitempty"`
 }
 
 type PasswordEntry struct {
@@ -95,6 +97,21 @@ type PasswordEntry struct {
 	VkHash        string   `json:"vk_hash,omitempty"`
 	Ports         string   `json:"ports,omitempty"` // "dtls,wg,tun"
 	IsDeactivated bool     `json:"is_deactivated,omitempty"`
+}
+
+func passwordEntryHasDevice(entry *PasswordEntry, deviceID string) bool {
+	if entry == nil {
+		return false
+	}
+	if entry.DeviceID == deviceID {
+		return true
+	}
+	for _, id := range entry.DeviceIDs {
+		if id == deviceID {
+			return true
+		}
+	}
+	return false
 }
 
 func (entry *PasswordEntry) canConnectAndBind(deviceID string) bool {
@@ -2282,11 +2299,26 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 		isMainPass := password != "" && password == db.MainPassword
 		entry, isGenPass := db.Passwords[password]
 		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
+		ownerID := wrapKeyID(password)
 
 		if valid && isGenPass && entry.IsDeactivated {
 			dbMutex.Unlock()
 			clientConn.Write([]byte("DENIED:deactivated"))
 			return
+		}
+		if valid && isGenPass {
+			if existing := db.Devices[deviceID]; existing != nil && existing.RawOwnerID != "" && existing.RawOwnerID != ownerID {
+				dbMutex.Unlock()
+				clientConn.Write([]byte("DENIED:device_mismatch"))
+				return
+			}
+			for otherPassword, otherEntry := range db.Passwords {
+				if otherPassword != password && passwordEntryHasDevice(otherEntry, deviceID) && !isPasswordExpired(otherEntry) {
+					dbMutex.Unlock()
+					clientConn.Write([]byte("DENIED:device_mismatch"))
+					return
+				}
+			}
 		}
 		if valid && isGenPass && !entry.canConnectAndBind(deviceID) {
 			dbMutex.Unlock()
@@ -2308,12 +2340,22 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 
 		dev, exists := db.Devices[deviceID]
 		if !exists {
-			dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP(), RawIP: getNextRawIP()}
+			dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP(), RawIP: getNextRawIP(), RawOwnerID: ownerID}
 			db.Devices[deviceID] = dev
 			saveDB()
-		} else if dev.RawIP == "" {
-			dev.RawIP = getNextRawIP()
-			saveDB()
+		} else {
+			changed := false
+			if dev.RawIP == "" {
+				dev.RawIP = getNextRawIP()
+				changed = true
+			}
+			if dev.RawOwnerID == "" && isGenPass {
+				dev.RawOwnerID = ownerID
+				changed = true
+			}
+			if changed {
+				saveDB()
+			}
 		}
 		assignedIP = dev.RawIP
 		dbMutex.Unlock()
@@ -2326,12 +2368,33 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 			return
 		}
 	} else {
-		// AUTH-путь (остальные воркеры группы): как и в классическом handleConn,
-		// пароль здесь не проверяется — авторизацию уже подтвердил obfs WRAP-ключ
-		// (без верного пароля пакет не прошёл бы аутентификацию на уровне obfs),
-		// нужен только IP устройства, чтобы зарегистрировать сессию в роутере.
 		dbMutex.Lock()
+		isMainPass := password != "" && password == db.MainPassword
+		entry, isGenPass := db.Passwords[password]
+		valid := isMainPass || (isGenPass && !isPasswordExpired(entry) && !entry.IsDeactivated)
+		bound := isMainPass
+		if valid && isGenPass {
+			bound = entry.DeviceID == deviceID
+			if !bound {
+				for _, id := range entry.DeviceIDs {
+					if id == deviceID {
+						bound = true
+						break
+					}
+				}
+			}
+		}
+		if !valid || !bound {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:device_mismatch"))
+			return
+		}
 		dev, exists := db.Devices[deviceID]
+		if exists && isGenPass && dev.RawOwnerID != "" && dev.RawOwnerID != wrapKeyID(password) {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:device_mismatch"))
+			return
+		}
 		if exists && dev.RawIP == "" {
 			dev.RawIP = getNextRawIP()
 			saveDB()
@@ -2366,6 +2429,7 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 
 	b := getBuf()
 	defer putBuf(b)
+	assignedAddr := net.ParseIP(assignedIP).To4()
 	// В отличие от классического WG-пути (30 минут простоя — не страшно, это
 	// просто неиспользуемая горутина), мёртвая raw-сессия продолжает висеть в
 	// r.sessions[ip].workers и отравляет round-robin в pickDownlinkConn для
@@ -2408,6 +2472,9 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 			// Клиент явно сообщил об отключении — сразу освобождаем слот,
 			// не дожидаясь idleTimeout (см. комментарий выше и session.go).
 			return
+		}
+		if nn < 20 || (*b)[0]>>4 != 4 || assignedAddr == nil || !bytes.Equal((*b)[12:16], assignedAddr) {
+			continue
 		}
 		atomic.AddInt64(&totalBytesFromClient, int64(nn))
 		addRawUplinkBytes(deviceID, int64(nn))
@@ -2466,27 +2533,92 @@ func removeDeviceFromSystem(devID string) {
 	}
 }
 
-func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
+var profileChallenges = struct {
+	sync.Mutex
+	items map[string]time.Time
+}{items: make(map[string]time.Time)}
+
+func handleAPIProfileChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
-
-	password := r.FormValue("password")
-	if password == "" {
-		http.Error(w, `{"error":"Missing password"}`, http.StatusBadRequest)
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
 		return
 	}
+	nonce := base64.RawURLEncoding.EncodeToString(b)
+	now := time.Now()
+	profileChallenges.Lock()
+	for value, expires := range profileChallenges.items {
+		if !expires.After(now) {
+			delete(profileChallenges.items, value)
+		}
+	}
+	if len(profileChallenges.items) >= 8192 {
+		profileChallenges.Unlock()
+		http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
+		return
+	}
+	profileChallenges.items[nonce] = now.Add(time.Minute)
+	profileChallenges.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"nonce": nonce})
+}
 
+func profileKeyID(password string) string {
+	sum := sha256.Sum256([]byte("WDTT-PROFILE-ID-v1\x00" + password))
+	return hex.EncodeToString(sum[:])
+}
+
+func authenticateProfileRequest(r *http.Request, action string) (string, string, bool) {
+	deviceID := r.FormValue("device_id")
+	nonce := r.FormValue("nonce")
+	keyID := r.FormValue("key_id")
+	proof, err := hex.DecodeString(r.FormValue("proof"))
+	if deviceID == "" || nonce == "" || keyID == "" || err != nil || len(proof) != sha256.Size {
+		return "", "", false
+	}
+	now := time.Now()
+	profileChallenges.Lock()
+	expires, exists := profileChallenges.items[nonce]
+	delete(profileChallenges.items, nonce)
+	profileChallenges.Unlock()
+	if !exists || !expires.After(now) {
+		return "", "", false
+	}
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
+	for password, entry := range db.Passwords {
+		if profileKeyID(password) != keyID || isPasswordExpired(entry) || entry.IsDeactivated {
+			continue
+		}
+		mac := hmac.New(sha256.New, []byte(password))
+		mac.Write([]byte(action + "\n" + deviceID + "\n" + nonce))
+		if hmac.Equal(proof, mac.Sum(nil)) {
+			return password, deviceID, true
+		}
+		return "", "", false
+	}
+	return "", "", false
+}
 
+func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	password, deviceID, valid := authenticateProfileRequest(r, "status")
+	if !valid {
+		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
 	entry, exists := db.Passwords[password]
-	if !exists || isPasswordExpired(entry) {
-		http.Error(w, `{"error":"Unauthorized or expired password"}`, http.StatusUnauthorized)
+	if !exists || isPasswordExpired(entry) || entry.IsDeactivated {
+		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 
@@ -2500,7 +2632,6 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 		boundDevices = 1
 	}
 
-	deviceID := r.FormValue("device_id")
 	isCurrentBound := false
 
 	activeCount := 0
@@ -2537,30 +2668,22 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAPIProfileUnbind(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
-
-	password := r.FormValue("password")
-	deviceID := r.FormValue("device_id")
-	if password == "" {
-		http.Error(w, `{"error":"Missing password"}`, http.StatusBadRequest)
+	password, deviceID, valid := authenticateProfileRequest(r, "unbind")
+	if !valid {
+		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
-
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
-
 	entry, exists := db.Passwords[password]
-	if !exists || isPasswordExpired(entry) {
-		http.Error(w, `{"error":"Unauthorized or expired password"}`, http.StatusUnauthorized)
+	if !exists || isPasswordExpired(entry) || entry.IsDeactivated {
+		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
-
 	unbindDevices(entry, deviceID)
 	saveDB()
 
@@ -2652,6 +2775,7 @@ func main() {
 
 	go func() {
 		mux := http.NewServeMux()
+		mux.HandleFunc("/api/profile/challenge", handleAPIProfileChallenge)
 		mux.HandleFunc("/api/profile/status", handleAPIProfileStatus)
 		mux.HandleFunc("/api/profile/unbind", handleAPIProfileUnbind)
 
@@ -3136,6 +3260,63 @@ type ObfsConfig struct {
 
 var aeadCache sync.Map
 
+const replayWindowSpan = uint64(4096 * 961)
+
+type replayWindow struct {
+	mu          sync.Mutex
+	seen        map[[12]byte]uint64
+	ssrc        uint32
+	highestTime uint64
+	initialized bool
+}
+
+func (w *replayWindow) accept(wire []byte) bool {
+	if len(wire) < rtpHeaderLen {
+		return false
+	}
+	ssrc := binary.BigEndian.Uint32(wire[8:12])
+	seq := binary.BigEndian.Uint16(wire[2:4])
+	ts := binary.BigEndian.Uint32(wire[4:8])
+	var nonce [12]byte
+	copy(nonce[:], obfsBuildNonce(ssrc, seq, ts))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.initialized {
+		w.ssrc = ssrc
+		w.highestTime = uint64(ts)
+		w.seen = make(map[[12]byte]uint64, 4096)
+		w.initialized = true
+	} else if w.ssrc != ssrc {
+		return false
+	}
+	if _, exists := w.seen[nonce]; exists {
+		return false
+	}
+	base := w.highestTime &^ uint64(0xffffffff)
+	extended := base | uint64(ts)
+	if extended+(1<<31) < w.highestTime {
+		extended += 1 << 32
+	} else if extended > w.highestTime+(1<<31) && extended >= 1<<32 {
+		extended -= 1 << 32
+	}
+	if extended+replayWindowSpan < w.highestTime {
+		return false
+	}
+	if extended > w.highestTime {
+		w.highestTime = extended
+	}
+	if len(w.seen) >= 8192 {
+		cutoff := w.highestTime - min(w.highestTime, replayWindowSpan)
+		for value, packetTime := range w.seen {
+			if packetTime < cutoff {
+				delete(w.seen, value)
+			}
+		}
+	}
+	w.seen[nonce] = extended
+	return true
+}
+
 func getAEAD(key []byte) (cipher.AEAD, error) {
 	if len(key) != wrapKeyLen {
 		return nil, fmt.Errorf("obfs: key must be %d bytes", wrapKeyLen)
@@ -3349,6 +3530,7 @@ type wrapPacketConn struct {
 	authLog   int32
 	obfsCfg   *ObfsConfig
 	obfsWrite *ObfsState
+	replay    replayWindow
 }
 
 // wrapReadBufPool — промежуточный буфер под RTP-заголовок+AEAD-тег+padding
@@ -3396,6 +3578,9 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		}
 		c.obfsWrite = NewObfsState()
 		atomic.StoreInt32(&c.selected, 1)
+		if !c.replay.accept(raw) {
+			return 0, addr, errors.New("wrap: replay")
+		}
 		if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
 			log.Printf("[WRAP] OK: ключ выбран для %s (keys=%d)", addr.String(), c.keys.Count())
 		}
@@ -3408,6 +3593,12 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		// Пробуем пере-верифицировать пакет по всем активным ключам
 		key, m2, uErr2 := c.keys.Unwrap(raw, p)
 		if uErr2 == nil {
+			if !bytes.Equal(key, c.key) {
+				c.replay = replayWindow{}
+			}
+			if !c.replay.accept(raw) {
+				return 0, addr, errors.New("wrap: replay")
+			}
 			c.key = append([]byte(nil), key...) // На лету обновляем ключ сессии!
 			c.obfsCfg = NewObfsConfig("audio")
 			if len(raw) > 1 {
@@ -3421,6 +3612,9 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			return m2, addr, nil
 		}
 		return 0, addr, fmt.Errorf("obfs unwrap: %w", uErr)
+	}
+	if !c.replay.accept(raw) {
+		return 0, addr, errors.New("wrap: replay")
 	}
 	return m, addr, nil
 }
