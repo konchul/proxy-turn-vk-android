@@ -1,0 +1,112 @@
+name: Android release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build signed release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          git fetch origin master
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+          version="${GITHUB_REF_NAME#v}"
+          gradle_version="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+          test -n "$gradle_version"
+          test "$version" = "$gradle_version"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: |
+            go.sum
+            go_client/go.sum
+
+      - name: Build Linux server asset
+        run: go build -trimpath -o app/src/main/assets/server .
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+
+      - name: Prepare signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          keystore="$RUNNER_TEMP/qwdtt-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          printf '%s\n' \
+            "KEYSTORE_FILE=$keystore" \
+            "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" \
+            "KEY_ALIAS=$KEY_ALIAS" \
+            "KEY_PASSWORD=$KEY_PASSWORD" > local.properties
+
+      - name: Build release APKs
+        run: ./gradlew :app:assembleRelease -PtargetAbis=arm64-v8a,armeabi-v7a,x86_64 --no-daemon
+
+      - name: Verify and name APKs
+        shell: bash
+        run: |
+          mkdir -p dist
+          version="${GITHUB_REF_NAME#v}"
+          found=0
+          for apk in app/build/outputs/apk/release/*.apk; do
+            test -f "$apk" || continue
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$apk"
+            base="$(basename "$apk")"
+            arch="${base#app-}"
+            arch="${arch%-release.apk}"
+            cp "$apk" "dist/qwdtt-${version}-${arch}.apk"
+            found=1
+          done
+          test "$found" = 1
+          cd dist
+          sha256sum ./*.apk > SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--title "qWDTT ${GITHUB_REF_NAME}" --generate-notes)
+          case "$GITHUB_REF_NAME" in
+            *-alpha*|*-beta*|*-rc*) args+=(--prerelease) ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" dist/* "${args[@]}"
