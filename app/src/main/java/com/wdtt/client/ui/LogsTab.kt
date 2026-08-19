@@ -77,11 +77,15 @@ fun LogsTab() {
     }
     val pinnedStatsMessage = remember(statsText, isRunning, isConnecting, currentLogs) {
         val fromLog = currentLogs.firstOrNull { it.key == "stats" }?.message
-        when {
+        val message = when {
             !fromLog.isNullOrBlank() -> fromLog
             (isRunning || isConnecting) && statsText.isNotBlank() -> "[СТАТИСТИКА] $statsText"
             else -> null
         }
+        message?.replace(
+            Regex("""\s*\|\s*↓\s*[\d.,]+\s*МБ\s*/\s*↑\s*[\d.,]+\s*МБ"""),
+            ""
+        )
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
