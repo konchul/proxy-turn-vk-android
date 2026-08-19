@@ -24,7 +24,6 @@ app/src/main/jniLibs/
 
 # ===== Server binary =====
 app/src/main/assets/server
-server
 
 # ===== Keystore / Secrets =====
 *.keystore

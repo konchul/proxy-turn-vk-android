@@ -143,8 +143,26 @@ tasks.register<Exec>("buildNativeLibs") {
     )
 }
 
+tasks.register<Exec>("buildServerAsset") {
+    group = "build"
+    description = "Build Linux server binary and copy it into app assets"
+    workingDir = rootDir
+    environment("GOOS", "linux")
+    environment("GOARCH", "amd64")
+    environment("CGO_ENABLED", "0")
+    commandLine(
+        "go",
+        "build",
+        "-trimpath",
+        "-o",
+        rootDir.resolve("app/src/main/assets/server").absolutePath,
+        "./server",
+    )
+}
+
 tasks.named("preBuild").configure {
     dependsOn("buildNativeLibs")
+    dependsOn("buildServerAsset")
 }
 
 dependencies {

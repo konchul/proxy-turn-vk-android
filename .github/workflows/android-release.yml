@@ -49,9 +49,6 @@ jobs:
             go.sum
             go_client/go.sum
 
-      - name: Build Linux server asset
-        run: go build -trimpath -o app/src/main/assets/server .
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 

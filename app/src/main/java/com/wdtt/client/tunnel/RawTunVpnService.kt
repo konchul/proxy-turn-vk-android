@@ -40,7 +40,7 @@ class RawTunVpnService : VpnService() {
         super.onDestroy()
     }
 
-    /** Поднимает TUN с параметрами из RAWCONF (см. server.go RAWCONF / protocol.go RequestRawConfig). */
+    /** Поднимает TUN с параметрами из RAWCONF. */
     fun establish(ip: String, dnsCsv: String, mtu: Int): ParcelFileDescriptor {
         diag("establish() start: ip=$ip mtu=$mtu dnsCsv=$dnsCsv")
         diag("Android: SDK=${Build.VERSION.SDK_INT} release=${Build.VERSION.RELEASE} manufacturer=${Build.MANUFACTURER} model=${Build.MODEL}")
