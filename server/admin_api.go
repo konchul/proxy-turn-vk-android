@@ -69,6 +69,11 @@ func adminAuthorized(r *http.Request) bool {
 
 func recordAdminAuthFailure(host string, now time.Time) {
 	adminAuthMu.Lock()
+	for address, existing := range adminAuthAttempts {
+		if now.Sub(existing.windowStart) > 10*time.Minute && now.After(existing.blockedTill) {
+			delete(adminAuthAttempts, address)
+		}
+	}
 	attempt := adminAuthAttempts[host]
 	if attempt.windowStart.IsZero() || now.Sub(attempt.windowStart) > time.Minute {
 		attempt = adminAuthAttempt{windowStart: now}
@@ -124,7 +129,9 @@ func toAdminPasswordView(pass string, entry *PasswordEntry) adminPasswordView {
 	activeDevicesMu.Lock()
 	active := 0
 	for _, id := range deviceIDs {
-		active += int(activeDevices[id])
+		if activeDevices[id] > 0 {
+			active++
+		}
 	}
 	activeDevicesMu.Unlock()
 
@@ -228,7 +235,10 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 
 	newPass := ""
 	for i := 0; i < 10; i++ {
-		candidate := generatePassword()
+		candidate, generateErr := generatePassword()
+		if generateErr != nil {
+			break
+		}
 		if _, exists := db.Passwords[candidate]; !exists {
 			newPass = candidate
 			break
@@ -369,6 +379,8 @@ func handleAdminDeactivatePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entry.IsDeactivated = true
+	disconnectCredentialConnections(pass)
+	serverWrapKeys.RemovePassword(pass)
 	disconnectPasswordDevicesLocked(entry)
 	saveDB()
 	view := toAdminPasswordView(pass, entry)
@@ -404,6 +416,11 @@ func handleAdminActivatePassword(w http.ResponseWriter, r *http.Request) {
 	if !exists || entry == nil {
 		dbMutex.Unlock()
 		writeAdminError(w, http.StatusNotFound, "password not found")
+		return
+	}
+	if err := serverWrapKeys.AddPassword(pass); err != nil {
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to activate password")
 		return
 	}
 	entry.IsDeactivated = false
@@ -458,6 +475,7 @@ func handleAdminDeletePassword(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	delete(db.Passwords, pass)
+	disconnectCredentialConnections(pass)
 	serverWrapKeys.RemovePassword(pass)
 	saveDB()
 	dbMutex.Unlock()
@@ -525,6 +543,7 @@ func handleAdminUnbindDevice(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusNotFound, "password not found")
 		return
 	}
+	disconnectCredentialDeviceConnections(pass, deviceID)
 	unbindDevices(entry, deviceID)
 	saveDB()
 	view := toAdminPasswordView(pass, entry)

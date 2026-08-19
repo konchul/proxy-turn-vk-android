@@ -48,6 +48,9 @@ func generateKeyPair() (privB64, pubB64 string, err error) {
 func loadOrGenerateKeys(dir string) (*wgKeys, error) {
 	f := filepath.Join(dir, "wg-keys.dat")
 	if data, err := os.ReadFile(f); err == nil {
+		if err := os.Chmod(f, 0600); err != nil {
+			return nil, fmt.Errorf("protect key file: %w", err)
+		}
 		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 		if len(lines) >= 4 {
 			keys := &wgKeys{
@@ -77,10 +80,14 @@ generate:
 		return nil, err
 	}
 	keys := &wgKeys{sPriv, sPub, cPriv, cPub}
-	os.MkdirAll(dir, 0700)
-	os.WriteFile(f, []byte(fmt.Sprintf("%s\n%s\n%s\n%s\n",
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("create key directory: %w", err)
+	}
+	if err := os.WriteFile(f, []byte(fmt.Sprintf("%s\n%s\n%s\n%s\n",
 		keys.serverPrivate, keys.serverPublic,
-		keys.clientPrivate, keys.clientPublic)), 0600)
+		keys.clientPrivate, keys.clientPublic)), 0600); err != nil {
+		return nil, fmt.Errorf("write key file: %w", err)
+	}
 	log.Printf("[WG] Ключи сохранены в %s", f)
 	return keys, nil
 }

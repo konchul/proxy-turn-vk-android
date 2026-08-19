@@ -91,18 +91,7 @@ func flushRawDeviceTrafficLocked() {
 		if dev, ok := db.Devices[deviceID]; ok {
 			dev.UpBytes += c.up
 			dev.DownBytes += c.down
-		}
-		for _, entry := range db.Passwords {
-			matched := entry.DeviceID == deviceID
-			if !matched {
-				for _, id := range entry.DeviceIDs {
-					if id == deviceID {
-						matched = true
-						break
-					}
-				}
-			}
-			if matched {
+			if entry := generatedOwnerEntryLocked(dev, deviceID); entry != nil {
 				entry.UpBytes += c.up
 				entry.DownBytes += c.down
 			}
@@ -157,25 +146,14 @@ func updateTrafficFromWG() {
 			return
 		}
 
-		foundEntry := false
-		for _, entry := range db.Passwords {
-			matched := entry.DeviceID == targetDevID
-			if !matched {
-				for _, id := range entry.DeviceIDs {
-					if id == targetDevID {
-						matched = true
-						break
-					}
-				}
-			}
-			if matched {
-				entry.UpBytes += deltaRx
-				entry.DownBytes += deltaTx
-				foundEntry = true
-			}
+		dev := db.Devices[targetDevID]
+		entry := generatedOwnerEntryLocked(dev, targetDevID)
+		if entry != nil {
+			entry.UpBytes += deltaRx
+			entry.DownBytes += deltaTx
 		}
 
-		if !foundEntry {
+		if entry == nil {
 			atomic.AddInt64(&mainPassUp, deltaRx)
 			atomic.AddInt64(&mainPassDown, deltaTx)
 		}

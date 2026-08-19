@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -32,11 +33,21 @@ func main() {
 	wgPort := flag.Int("wg-port", defaultInternalWGPort, "WireGuard UDP порт")
 	configDir := flag.String("config-dir", "/etc/wdtt", "директория конфигурации")
 	mainPass := flag.String("password", "", "пароль владельца")
+	mainPassFile := flag.String("password-file", "", "файл пароля владельца")
 	adminID := flag.String("admin", "", "Telegram Admin ID")
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
+	botTokenFile := flag.String("bot-token-file", "", "файл Telegram Bot Token")
 	dnsFlag := flag.String("dns", "8.8.8.8", "DNS серверы для клиентов")
 	flag.Parse()
 	dns = *dnsFlag
+	mainPasswordValue, err := loadOptionalSecret(*mainPass, *mainPassFile)
+	if err != nil {
+		log.Fatalf("[CONFIG] Пароль владельца: %v", err)
+	}
+	botTokenValue, err := loadOptionalSecret(*botToken, *botTokenFile)
+	if err != nil {
+		log.Fatalf("[CONFIG] Telegram Bot Token: %v", err)
+	}
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Println("══════════════════════════════════════════")
@@ -74,7 +85,7 @@ func main() {
 		}
 	}()
 
-	initDB(*configDir, *mainPass, *adminID, *botToken)
+	initDB(*configDir, mainPasswordValue, *adminID, botTokenValue)
 
 	keys, err := loadOrGenerateKeys(*configDir)
 	if err != nil {
@@ -99,7 +110,7 @@ func main() {
 
 	go statsLoop(ctx, *configDir)
 	go expiredPasswordJanitor(ctx, wgDev)
-	go botLoop(*botToken, *adminID, wgDev)
+	go botLoop(botTokenValue, *adminID, wgDev)
 
 	go func() {
 		mux := http.NewServeMux()
@@ -110,7 +121,7 @@ func main() {
 		log.Printf("[API] Запуск HTTP API на %s (TCP)...", *listen)
 		server := &http.Server{
 			Addr:              *listen,
-			Handler:           mux,
+			Handler:           http.MaxBytesHandler(mux, 64<<10),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      10 * time.Second,
@@ -142,6 +153,9 @@ func main() {
 				WriteTimeout:      10 * time.Second,
 				IdleTimeout:       30 * time.Second,
 				MaxHeaderBytes:    16 << 10,
+				TLSConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+				},
 			}
 			log.Printf("[ADMIN API] HTTPS на %s", *adminListen)
 			if err := server.ListenAndServeTLS(*adminCert, *adminKey); err != nil {
@@ -151,7 +165,10 @@ func main() {
 	}
 
 	addr, _ := net.ResolveUDPAddr("udp", *listen)
-	cert, _ := selfsign.GenerateSelfSigned()
+	cert, certErr := selfsign.GenerateSelfSigned()
+	if certErr != nil {
+		log.Fatalf("[DTLS] Не удалось создать сертификат: %v", certErr)
+	}
 	if serverWrapKeys.Count() == 0 {
 		log.Fatalf("[WRAP] нет активных паролей для WRAP")
 	}

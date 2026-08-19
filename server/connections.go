@@ -14,6 +14,56 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 )
 
+var credentialConnections = struct {
+	sync.Mutex
+	items map[string]map[net.Conn]string
+}{items: make(map[string]map[net.Conn]string)}
+
+func trackCredentialConnection(password, deviceID string, conn net.Conn) func() {
+	ownerID := wrapKeyID(password)
+	credentialConnections.Lock()
+	connections := credentialConnections.items[ownerID]
+	if connections == nil {
+		connections = make(map[net.Conn]string)
+		credentialConnections.items[ownerID] = connections
+	}
+	connections[conn] = deviceID
+	credentialConnections.Unlock()
+	return func() {
+		credentialConnections.Lock()
+		delete(connections, conn)
+		if len(connections) == 0 {
+			delete(credentialConnections.items, ownerID)
+		}
+		credentialConnections.Unlock()
+	}
+}
+
+func disconnectCredentialConnections(password string) {
+	disconnectCredentialDeviceConnections(password, "")
+}
+
+func disconnectCredentialDeviceConnections(password, deviceID string) {
+	ownerID := wrapKeyID(password)
+	credentialConnections.Lock()
+	connections := credentialConnections.items[ownerID]
+	list := make([]net.Conn, 0, len(connections))
+	for conn, activeDeviceID := range connections {
+		if deviceID != "" && activeDeviceID != deviceID {
+			continue
+		}
+		list = append(list, conn)
+		delete(connections, conn)
+	}
+	if len(connections) == 0 {
+		delete(credentialConnections.items, ownerID)
+	}
+	credentialConnections.Unlock()
+	for _, conn := range list {
+		conn.Close()
+	}
+}
+
 // ==================== Обработка соединений ====================
 
 // directConn — net.Conn поверх уже обфусцированного (RTP-obfs AEAD) UDP-потока
@@ -53,6 +103,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 	atomic.AddInt64(&totalConns, 1)
 
 	var connDeviceID string
+	var authenticatedPassword string
 
 	// DTLS-клиенты (обратная совместимость): хендшейк перед чтением данных.
 	// Прямые (-notls) клиенты приходят уже как directConn — RTP-obfs AEAD
@@ -95,6 +146,10 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		if len(parts) > 2 {
 			password = parts[2]
 		}
+		if !connectionCredentialMatches(clientConn, password) {
+			clientConn.Write([]byte("DENIED:wrong_password"))
+			return
+		}
 
 		dbMutex.Lock()
 
@@ -104,26 +159,33 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
 
 		// Для сгенерированных паролей — проверяем привязку к устройству
-		if valid && isGenPass && entry.IsDeactivated {
+		if valid && !authorizeDeviceOwnerLocked(deviceID, password, isMainPass, entry) {
+			clientConn.Write([]byte("DENIED:device_mismatch"))
+			log.Printf("[WG] Отказ: устройство %s принадлежит другому доступу", deviceID)
+			dbMutex.Unlock()
+			return
+		} else if valid && isGenPass && entry.IsDeactivated {
 			clientConn.Write([]byte("DENIED:deactivated"))
 			log.Printf("[WG] Отказ: пароль %s деактивирован, запрос от %s", maskPassword(password), deviceID)
 			dbMutex.Unlock()
+			return
 		} else if valid && isGenPass && !entry.canConnectAndBind(deviceID) {
 			// Достигнут лимит устройств или привязано к другому устройству
 			clientConn.Write([]byte("DENIED:device_mismatch"))
 			log.Printf("[WG] Отказ: пароль %s достиг лимита устройств (%d), запрос от %s", maskPassword(password), entry.MaxDevices, deviceID)
 			dbMutex.Unlock()
+			return
 		} else if valid {
 			connDeviceID = deviceID
+			authenticatedPassword = password
 
 			// Сохраняем БД, так как canConnectAndBind мог внести привязку нового устройства
-			if isGenPass {
-				saveDB()
-			}
+			saveDB()
 
 			dev, exists := db.Devices[deviceID]
 			if !exists {
 				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
+				setDeviceOwner(dev, password)
 			}
 			// Устройство могло быть создано раньше только Raw-путём
 			// (GETCONF_RAW, см. handleConnRaw) — там PrivKey/PubKey никогда
@@ -152,6 +214,8 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort)))
 			} else {
 				clientConn.Write([]byte("NOCONF"))
+				dbMutex.Unlock()
+				return
 			}
 			dbMutex.Unlock()
 		} else {
@@ -163,6 +227,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				log.Printf("[WG] Отказ (неверный пароль) от %s", deviceID)
 			}
 			dbMutex.Unlock()
+			return
 		}
 
 		clientConn.SetReadDeadline(time.Now().Add(5 * time.Minute))
@@ -176,11 +241,37 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 	} else if strings.HasPrefix(firstStr, "AUTH:") {
 		parts := strings.Split(strings.TrimSpace(strings.TrimPrefix(firstStr, "AUTH:")), "|")
 		deviceID := "unknown"
+		password := ""
 		if len(parts) > 0 {
 			deviceID = parts[0]
 		}
+		if len(parts) > 1 {
+			password = parts[1]
+		}
+		if !connectionCredentialMatches(clientConn, password) {
+			clientConn.Write([]byte("DENIED:wrong_password"))
+			return
+		}
+
+		dbMutex.Lock()
+		isMainPass := password != "" && password == db.MainPassword
+		entry, isGenPass := db.Passwords[password]
+		valid := isMainPass || (isGenPass && !isPasswordExpired(entry) && !entry.IsDeactivated)
+		bound := isMainPass
+		if valid && isGenPass {
+			bound = passwordEntryHasDevice(entry, deviceID)
+		}
+		ownerAllowed := valid && authorizeDeviceOwnerLocked(deviceID, password, isMainPass, entry)
+		if !valid || !bound || !ownerAllowed {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:device_mismatch"))
+			return
+		}
+		saveDB()
+		dbMutex.Unlock()
 
 		connDeviceID = deviceID
+		authenticatedPassword = password
 
 		clientConn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 		n, err = clientConn.Read(buf)
@@ -191,6 +282,11 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		firstPacket = buf[:n]
 		firstStr = string(firstPacket)
 	}
+	if authenticatedPassword == "" {
+		return
+	}
+	untrackCredential := trackCredentialConnection(authenticatedPassword, connDeviceID, clientConn)
+	defer untrackCredential()
 
 	if firstStr == "READY" {
 		clientConn.Write([]byte("READY_OK"))

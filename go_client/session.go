@@ -296,8 +296,14 @@ func RunSession(
 
 	if useWrap && (tp.NoDTLS || tp.RawMode) {
 		// ─── Прямой режим: RTP-obfs AEAD прямо поверх TURN relay, без DTLS ───
-		obfsCfg := NewObfsConfig(tp.ObfsMode)
-		obfsWriteState := NewObfsState()
+		obfsCfg, obfsErr := NewObfsConfig(tp.ObfsMode)
+		if obfsErr != nil {
+			return false, fmt.Errorf("RTP-obfs config: %w", obfsErr)
+		}
+		obfsWriteState, obfsErr := NewObfsState()
+		if obfsErr != nil {
+			return false, fmt.Errorf("RTP-obfs state: %w", obfsErr)
+		}
 		activeConn = &obfsDirectConn{
 			relay:      relay,
 			peer:       peer,
@@ -315,8 +321,14 @@ func RunSession(
 		var dtlsObfsCfg *ObfsConfig
 		var obfsWriteState *ObfsState
 		if useWrap {
-			dtlsObfsCfg = NewObfsConfig(tp.ObfsMode)
-			obfsWriteState = NewObfsState()
+			dtlsObfsCfg, err = NewObfsConfig(tp.ObfsMode)
+			if err != nil {
+				return false, fmt.Errorf("RTP-obfs config: %w", err)
+			}
+			obfsWriteState, err = NewObfsState()
+			if err != nil {
+				return false, fmt.Errorf("RTP-obfs state: %w", err)
+			}
 		}
 
 		relayWg.Add(2)
@@ -777,8 +789,14 @@ func RunPing(
 	var obfsCfg *ObfsConfig
 	var obfsWriteState *ObfsState
 	if useWrap {
-		obfsCfg = NewObfsConfig(tp.ObfsMode)
-		obfsWriteState = NewObfsState()
+		obfsCfg, err = NewObfsConfig(tp.ObfsMode)
+		if err != nil {
+			return 0, fmt.Errorf("RTP-obfs config: %w", err)
+		}
+		obfsWriteState, err = NewObfsState()
+		if err != nil {
+			return 0, fmt.Errorf("RTP-obfs state: %w", err)
+		}
 	}
 
 	// relay → pipeA

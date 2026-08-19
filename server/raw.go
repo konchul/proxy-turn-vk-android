@@ -344,6 +344,10 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 	if len(parts) > 1 {
 		password = parts[1]
 	}
+	if !connectionCredentialMatches(clientConn, password) {
+		clientConn.Write([]byte("DENIED:wrong_password"))
+		return
+	}
 
 	var assignedIP string
 
@@ -361,19 +365,10 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 			clientConn.Write([]byte("DENIED:deactivated"))
 			return
 		}
-		if valid && isGenPass {
-			if existing := db.Devices[deviceID]; existing != nil && existing.RawOwnerID != "" && existing.RawOwnerID != ownerID {
-				dbMutex.Unlock()
-				clientConn.Write([]byte("DENIED:device_mismatch"))
-				return
-			}
-			for otherPassword, otherEntry := range db.Passwords {
-				if otherPassword != password && passwordEntryHasDevice(otherEntry, deviceID) && !isPasswordExpired(otherEntry) {
-					dbMutex.Unlock()
-					clientConn.Write([]byte("DENIED:device_mismatch"))
-					return
-				}
-			}
+		if valid && !authorizeDeviceOwnerLocked(deviceID, password, isMainPass, entry) {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:device_mismatch"))
+			return
 		}
 		if valid && isGenPass && !entry.canConnectAndBind(deviceID) {
 			dbMutex.Unlock()
@@ -396,10 +391,15 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 		dev, exists := db.Devices[deviceID]
 		if !exists {
 			dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP(), RawIP: getNextRawIP(), RawOwnerID: ownerID}
+			setDeviceOwner(dev, password)
 			db.Devices[deviceID] = dev
 			saveDB()
 		} else {
 			changed := false
+			if dev.OwnerID == "" {
+				setDeviceOwner(dev, password)
+				changed = true
+			}
 			if dev.RawIP == "" {
 				dev.RawIP = getNextRawIP()
 				changed = true
@@ -439,16 +439,14 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 				}
 			}
 		}
-		if !valid || !bound {
+		if !valid || !bound || !authorizeDeviceOwnerLocked(deviceID, password, isMainPass, entry) {
 			dbMutex.Unlock()
 			clientConn.Write([]byte("DENIED:device_mismatch"))
 			return
 		}
 		dev, exists := db.Devices[deviceID]
-		if exists && isGenPass && dev.RawOwnerID != "" && dev.RawOwnerID != wrapKeyID(password) {
-			dbMutex.Unlock()
-			clientConn.Write([]byte("DENIED:device_mismatch"))
-			return
+		if exists && dev.OwnerID == "" {
+			setDeviceOwner(dev, password)
 		}
 		if exists && dev.RawIP == "" {
 			dev.RawIP = getNextRawIP()
@@ -464,6 +462,8 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 			return
 		}
 	}
+	untrackCredential := trackCredentialConnection(password, deviceID, clientConn)
+	defer untrackCredential()
 
 	dlWorker := router.register(assignedIP, clientConn, deviceID)
 	defer router.unregister(assignedIP, dlWorker)

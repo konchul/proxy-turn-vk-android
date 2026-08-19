@@ -4,10 +4,12 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -60,22 +62,37 @@ func removeDeviceFromSystem(devID string) {
 
 var profileChallenges = struct {
 	sync.Mutex
-	items map[string]time.Time
-}{items: make(map[string]time.Time)}
+	items    map[string]time.Time
+	attempts map[string]adminAuthAttempt
+}{items: make(map[string]time.Time), attempts: make(map[string]adminAuthAttempt)}
 
 func handleAPIProfileChallenge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
+	now := time.Now()
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	profileChallenges.Lock()
+	for address, attempt := range profileChallenges.attempts {
+		if now.Sub(attempt.windowStart) > time.Minute {
+			delete(profileChallenges.attempts, address)
+		}
+	}
+	attempt := profileChallenges.attempts[host]
+	if attempt.windowStart.IsZero() || now.Sub(attempt.windowStart) > time.Minute {
+		attempt = adminAuthAttempt{windowStart: now}
+	}
+	if attempt.count >= 30 {
+		profileChallenges.Unlock()
+		http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
 		return
 	}
-	nonce := base64.RawURLEncoding.EncodeToString(b)
-	now := time.Now()
-	profileChallenges.Lock()
+	attempt.count++
+	profileChallenges.attempts[host] = attempt
 	for value, expires := range profileChallenges.items {
 		if !expires.After(now) {
 			delete(profileChallenges.items, value)
@@ -86,6 +103,13 @@ func handleAPIProfileChallenge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
 		return
 	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		profileChallenges.Unlock()
+		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(b)
 	profileChallenges.items[nonce] = now.Add(time.Minute)
 	profileChallenges.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -108,7 +132,6 @@ func authenticateProfileRequest(r *http.Request, action string) (string, string,
 	now := time.Now()
 	profileChallenges.Lock()
 	expires, exists := profileChallenges.items[nonce]
-	delete(profileChallenges.items, nonce)
 	profileChallenges.Unlock()
 	if !exists || !expires.After(now) {
 		return "", "", false
@@ -116,12 +139,22 @@ func authenticateProfileRequest(r *http.Request, action string) (string, string,
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 	for password, entry := range db.Passwords {
-		if profileKeyID(password) != keyID || isPasswordExpired(entry) || entry.IsDeactivated {
+		candidateKeyID := profileKeyID(password)
+		if subtle.ConstantTimeCompare([]byte(candidateKeyID), []byte(keyID)) != 1 || isPasswordExpired(entry) || entry.IsDeactivated {
 			continue
 		}
 		mac := hmac.New(sha256.New, []byte(password))
 		mac.Write([]byte(action + "\n" + deviceID + "\n" + nonce))
 		if hmac.Equal(proof, mac.Sum(nil)) {
+			profileChallenges.Lock()
+			currentExpiry, stillExists := profileChallenges.items[nonce]
+			if stillExists && currentExpiry.After(time.Now()) {
+				delete(profileChallenges.items, nonce)
+			}
+			profileChallenges.Unlock()
+			if !stillExists || !currentExpiry.After(time.Now()) {
+				return "", "", false
+			}
 			return password, deviceID, true
 		}
 		return "", "", false
@@ -209,6 +242,7 @@ func handleAPIProfileUnbind(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
+	disconnectCredentialDeviceConnections(password, deviceID)
 	unbindDevices(entry, deviceID)
 	saveDB()
 

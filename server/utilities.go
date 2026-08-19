@@ -1,12 +1,29 @@
 package main
 
 import (
+	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 )
 
 // ==================== Утилиты ====================
+
+func loadOptionalSecret(value, path string) (string, error) {
+	if path == "" {
+		return value, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	secret := strings.TrimSpace(string(data))
+	if secret == "" {
+		return "", fmt.Errorf("пустой файл %s", path)
+	}
+	return secret, nil
+}
 
 func runCmd(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()

@@ -1327,6 +1327,8 @@ private suspend fun performDeploy(
 ): DeployResult = withContext(Dispatchers.IO) {
     var session: Session? = null
     val adminTokenFile = File(context.cacheDir, "wdtt-admin.token")
+    val mainPasswordFile = File(context.cacheDir, "wdtt-main.password")
+    val botTokenFile = File(context.cacheDir, "wdtt-bot.token")
     try {
         onProgress(0.02f, "Подключение...")
         session = createSSHSession(host, user, port, sshAuth)
@@ -1334,11 +1336,7 @@ private suspend fun performDeploy(
         val ssh = SSHClient(session, sshAuth.sudoPassword)
 
         onProgress(0.05f, "Подготовка файлов...")
-        val passArg = if (mainPass.isNotBlank()) "-password \"$mainPass\" " else ""
-        val adminArg = if (adminId.isNotBlank()) "-admin \"$adminId\" " else ""
-        val botArg = if (botToken.isNotBlank()) "-bot-token \"$botToken\" " else ""
-        val dnsArg = "-dns ${if(dns1.isNotBlank()) dns1 else "1.1.1.1"}${if(dns2.isNotBlank()) ",$dns2" else ""} "
-        val args = "$passArg$adminArg$botArg$dnsArg".trim()
+        val dnsServers = "${if(dns1.isNotBlank()) dns1 else "1.1.1.1"}${if(dns2.isNotBlank()) ",$dns2" else ""}"
 
         val scriptFile = File(context.cacheDir, "deploy.sh")
         val serverFile = File(context.cacheDir, "server")
@@ -1346,6 +1344,8 @@ private suspend fun performDeploy(
             context.assets.open("deploy.sh").use { inp -> FileOutputStream(scriptFile).use { out -> inp.copyTo(out) } }
             context.assets.open("server").use { inp -> FileOutputStream(serverFile).use { out -> inp.copyTo(out) } }
             FileOutputStream(adminTokenFile).use { it.write(adminApiToken.toByteArray(Charsets.UTF_8)) }
+            FileOutputStream(mainPasswordFile).use { it.write(mainPass.toByteArray(Charsets.UTF_8)) }
+            FileOutputStream(botTokenFile).use { it.write(botToken.toByteArray(Charsets.UTF_8)) }
         } catch (e: Exception) {
             DeployManager.writeError("Assets extraction failed: ${e.message}")
             DeployManager.stopDeploy("Ошибка: файлы не найдены в assets")
@@ -1363,15 +1363,19 @@ private suspend fun performDeploy(
         ssh.upload(scriptFile, "/tmp/deploy.sh")
         ssh.upload(serverFile, "/tmp/wdtt-server")
         ssh.upload(adminTokenFile, "/tmp/wdtt-admin.token")
+        ssh.upload(mainPasswordFile, "/tmp/wdtt-main.password")
+        ssh.upload(botTokenFile, "/tmp/wdtt-bot.token")
         scriptFile.delete()
         serverFile.delete()
         adminTokenFile.delete()
+        mainPasswordFile.delete()
+        botTokenFile.delete()
 
         onProgress(0.08f, "Установка...")
         val directPortEnv = if (directPort != null) "WDTT_DIRECT_PORT=$directPort " else ""
         val rawPortEnv = if (rawPort != null) "WDTT_RAW_PORT=$rawPort " else ""
         val output = ssh.exec(
-            rootCommand("chmod 600 /tmp/wdtt-admin.token && env WDTT_ARGS=${shellQuote(args)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port ${directPortEnv}${rawPortEnv}bash /tmp/deploy.sh"),
+            rootCommand("chmod 600 /tmp/wdtt-admin.token /tmp/wdtt-main.password /tmp/wdtt-bot.token && env WDTT_ADMIN_ID=${shellQuote(adminId)} WDTT_DNS_SERVERS=${shellQuote(dnsServers)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port ${directPortEnv}${rawPortEnv}bash /tmp/deploy.sh"),
             timeout = CMD_TIMEOUT
         )
         val certPin = Regex("WDTT_ADMIN_PIN\\|(sha256/[A-Za-z0-9+/=]+)")
@@ -1400,6 +1404,8 @@ private suspend fun performDeploy(
         return@withContext DeployResult(false)
     } finally {
         adminTokenFile.delete()
+        mainPasswordFile.delete()
+        botTokenFile.delete()
         try { session?.disconnect() } catch (_: Exception) {}
         DeployManager.activeSession = null
     }

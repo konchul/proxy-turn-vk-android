@@ -14,6 +14,52 @@ import (
 
 // ==================== WireGuard ====================
 
+type loopbackOnlyBind struct {
+	conn.Bind
+}
+
+func (b *loopbackOnlyBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
+	receivers, actualPort, err := b.Bind.Open(port)
+	if err != nil {
+		return nil, 0, err
+	}
+	wrapped := make([]conn.ReceiveFunc, len(receivers))
+	for i, receive := range receivers {
+		inner := receive
+		wrapped[i] = func(packets [][]byte, sizes []int, endpoints []conn.Endpoint) (int, error) {
+			for {
+				n, receiveErr := inner(packets, sizes, endpoints)
+				if receiveErr != nil {
+					return 0, receiveErr
+				}
+				kept := 0
+				for j := 0; j < n; j++ {
+					if endpoints[j] == nil || !endpoints[j].DstIP().IsLoopback() {
+						continue
+					}
+					if kept != j {
+						packets[kept] = packets[j]
+						sizes[kept] = sizes[j]
+						endpoints[kept] = endpoints[j]
+					}
+					kept++
+				}
+				if kept > 0 {
+					return kept, nil
+				}
+			}
+		}
+	}
+	return wrapped, actualPort, nil
+}
+
+func (b *loopbackOnlyBind) Send(bufs [][]byte, endpoint conn.Endpoint) error {
+	if endpoint == nil || !endpoint.DstIP().IsLoopback() {
+		return fmt.Errorf("WireGuard endpoint outside loopback rejected")
+	}
+	return b.Bind.Send(bufs, endpoint)
+}
+
 func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
 	runCmdSilent("ip", "link", "del", wgIfaceName)
 	time.Sleep(100 * time.Millisecond)
@@ -30,7 +76,7 @@ func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
 	}
 
 	logger := device.NewLogger(device.LogLevelError, "[WG] ")
-	bind := conn.NewDefaultBind()
+	bind := &loopbackOnlyBind{Bind: conn.NewDefaultBind()}
 	dev := device.NewDevice(tunDev, bind, logger)
 
 	serverPrivHex, _ := b64ToHex(keys.serverPrivate)
