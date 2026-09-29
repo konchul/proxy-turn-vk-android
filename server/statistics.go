@@ -25,66 +25,86 @@ var (
 	lastWGStats          = make(map[string]struct{ rx, tx int64 })
 )
 
-// rawDeviceTraffic — per-device счётчики трафика raw-режима, копятся в
-// памяти atomic'ами на горячем пути (каждый uplink/downlink пакет) и
-// периодически сбрасываются в db.Devices/db.Passwords в statsLoop под
-// dbMutex — так же, как updateTrafficFromWG делает для WireGuard. Прямая
-// запись в БД на каждый пакет была бы недопустимо дорогой (db-мьютекс на
-// тысячи pps от 380+ клиентов), а глобальные totalBytesFromClient/
-// totalBytesToClient раньше не разбивались по устройствам вообще — Raw-
-// трафик не попадал ни в бота, ни в /api/profile/status.
+// rawTrafficCounter — накопитель трафика raw-режима для одного устройства.
 type rawTrafficCounter struct {
 	up   int64
 	down int64
 }
 
+// rawClosedTraffic — остатки счётчиков сессий, закрытых между flush'ами
+// (unregister переносит их сюда, чтобы трафик не потерялся). Запись только
+// при закрытии сессии — редкое событие, не горячий путь.
 var (
-	rawDeviceTrafficMu sync.Mutex
-	rawDeviceTraffic   = make(map[string]*rawTrafficCounter)
+	rawClosedTrafficMu sync.Mutex
+	rawClosedTraffic   = make(map[string]*rawTrafficCounter)
 )
 
-func addRawUplinkBytes(deviceID string, n int64) {
+func addRawClosedBytes(deviceID string, up, down int64) {
 	if deviceID == "" || deviceID == "unknown" {
 		return
 	}
-	rawDeviceTrafficMu.Lock()
-	c := rawDeviceTraffic[deviceID]
+	rawClosedTrafficMu.Lock()
+	c := rawClosedTraffic[deviceID]
 	if c == nil {
 		c = &rawTrafficCounter{}
-		rawDeviceTraffic[deviceID] = c
+		rawClosedTraffic[deviceID] = c
 	}
-	c.up += n
-	rawDeviceTrafficMu.Unlock()
-}
-
-func addRawDownlinkBytes(deviceID string, n int64) {
-	if deviceID == "" || deviceID == "unknown" {
-		return
-	}
-	rawDeviceTrafficMu.Lock()
-	c := rawDeviceTraffic[deviceID]
-	if c == nil {
-		c = &rawTrafficCounter{}
-		rawDeviceTraffic[deviceID] = c
-	}
-	c.down += n
-	rawDeviceTrafficMu.Unlock()
+	c.up += up
+	c.down += down
+	rawClosedTrafficMu.Unlock()
 }
 
 // flushRawDeviceTraffic переносит накопленные с прошлого вызова байты в
-// db.Devices/db.Passwords (вызывающий должен держать dbMutex — см. вызов в
-// statsLoop, тот же паттерн, что updateTrafficFromWG под тем же локом).
-func flushRawDeviceTrafficLocked() {
-	rawDeviceTrafficMu.Lock()
-	if len(rawDeviceTraffic) == 0 {
-		rawDeviceTrafficMu.Unlock()
+// db.Devices/db.Passwords. Счётчики лежат атомиками в самих downlinkWorker'ах
+// (uplink инкрементирует handleConnRaw, downlink — writer-горутина воркера),
+// поэтому горячий путь не берёт ни глобальных локов, ни map-поисков; сюда
+// попадают только дельты раз в 10 секунд (statsLoop) и при завершении.
+func flushRawDeviceTraffic() {
+	router := globalRawRouter.Load()
+	deltas := make(map[string]*rawTrafficCounter)
+	if router != nil {
+		router.mu.RLock()
+		for _, cs := range router.sessions {
+			for _, w := range cs.workers {
+				up := w.upBytes.Swap(0)
+				down := w.downBytes.Swap(0)
+				if up == 0 && down == 0 {
+					continue
+				}
+				c := deltas[w.deviceID]
+				if c == nil {
+					c = &rawTrafficCounter{}
+					deltas[w.deviceID] = c
+				}
+				c.up += up
+				c.down += down
+			}
+		}
+		router.mu.RUnlock()
+	}
+
+	rawClosedTrafficMu.Lock()
+	if len(rawClosedTraffic) > 0 {
+		closed := rawClosedTraffic
+		rawClosedTraffic = make(map[string]*rawTrafficCounter)
+		for deviceID, c := range closed {
+			d := deltas[deviceID]
+			if d == nil {
+				deltas[deviceID] = &rawTrafficCounter{up: c.up, down: c.down}
+			} else {
+				d.up += c.up
+				d.down += c.down
+			}
+		}
+	}
+	rawClosedTrafficMu.Unlock()
+
+	if len(deltas) == 0 {
 		return
 	}
-	snapshot := rawDeviceTraffic
-	rawDeviceTraffic = make(map[string]*rawTrafficCounter)
-	rawDeviceTrafficMu.Unlock()
 
-	for deviceID, c := range snapshot {
+	dbMutex.Lock()
+	for deviceID, c := range deltas {
 		if c.up == 0 && c.down == 0 {
 			continue
 		}
@@ -97,6 +117,7 @@ func flushRawDeviceTrafficLocked() {
 			}
 		}
 	}
+	dbMutex.Unlock()
 }
 
 func updateTrafficFromWG() {
@@ -201,8 +222,8 @@ func statsLoop(ctx context.Context, configDir string) {
 			)
 
 			// Пишем server.log и периодически сохраняем БД на диск
+			flushRawDeviceTraffic()
 			dbMutex.Lock()
-			flushRawDeviceTrafficLocked()
 			numPasswords := len(db.Passwords)
 			numDevices := len(db.Devices)
 			saveTicks++

@@ -95,7 +95,11 @@ class TunnelService : Service() {
                         // "[СЕТЬ] Транспорт: без DTLS" на экране логов при активном Raw.
                         val noDtlsEnabled = !isRawTun && store.noDtlsEnabled.first()
                         val serverDirectPort = if (manualPortsEnabled) store.serverDirectPort.first() else 56002
-                        val serverRawPort = if (manualPortsEnabled) store.serverRawPort.first() else 56003
+                        val serverRawPort = when {
+                            store.rawAesMode.first() -> 46000
+                            manualPortsEnabled -> store.serverRawPort.first()
+                            else -> 46000
+                        }
                         val effectiveServerPort = when {
                             isRawTun -> serverRawPort
                             noDtlsEnabled -> serverDirectPort
@@ -203,7 +207,11 @@ class TunnelService : Service() {
                 val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
                 val noDtlsEnabled = !isRawTunRestore && store.noDtlsEnabled.first()
                 val serverDirectPort = if (manualPortsEnabled) store.serverDirectPort.first() else 56002
-                val serverRawPort = if (manualPortsEnabled) store.serverRawPort.first() else 56003
+                val serverRawPort = when {
+                    store.rawAesMode.first() -> 46000
+                    manualPortsEnabled -> store.serverRawPort.first()
+                    else -> 46000
+                }
                 val effectiveServerPort = when {
                     isRawTunRestore -> serverRawPort
                     noDtlsEnabled -> serverDirectPort
@@ -723,7 +731,7 @@ class TunnelService : Service() {
         )
 
         return NotificationCompat.Builder(this, TUNNEL_NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("qWDTT")
+            .setContentTitle("27 White")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat_connected)
             .setOngoing(true)

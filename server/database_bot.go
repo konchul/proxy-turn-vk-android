@@ -480,7 +480,7 @@ func (s *wrapKeyStore) Count() int {
 	return len(s.entries)
 }
 
-func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, string, int, error) {
+func (s *wrapKeyStore) Unwrap(raw, dst []byte, c obfsCipher) ([]byte, string, int, error) {
 	if !obfsIsRTPPacket(raw) {
 		return nil, "", 0, errors.New("wrap: non-obfs packet")
 	}
@@ -491,7 +491,13 @@ func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, string, int, error) {
 		return nil, "", 0, errors.New("wrap: no active keys")
 	}
 	for _, entry := range s.entries {
-		m, err := obfsUnwrapPacket(entry.key, raw, dst)
+		var m int
+		var err error
+		if c == obfsAESGCM {
+			m, err = obfsUnwrapPacketAES(entry.key, raw, dst)
+		} else {
+			m, err = obfsUnwrapPacket(entry.key, raw, dst)
+		}
 		if err == nil {
 			return append([]byte(nil), entry.key...), entry.id, m, nil
 		}

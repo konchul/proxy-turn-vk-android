@@ -23,7 +23,7 @@ type SavedProfile struct {
 }
 
 const (
-	profileFile         = "vk_profile.json"
+	profileFile          = "vk_profile.json"
 	captchaBrowserFpFile = "captcha_browser_fp"
 )
 

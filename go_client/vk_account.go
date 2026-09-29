@@ -177,11 +177,11 @@ func handleTurnCredsStdinLine(line string) {
 		log.Printf("[VK Auth] TURN_CREDS rejected: empty fields for link %s", link)
 		return
 	}
-		injectTurnCreds(link, payload.User, payload.Pass, payload.URLs)
-		normalized := turnURLsToAddresses(payload.URLs)
-		payload.URLs = cloneStringSlice(normalized)
-		drainTurnCredsResult()
-		TurnCredsResultChan <- payload
+	injectTurnCreds(link, payload.User, payload.Pass, payload.URLs)
+	normalized := turnURLsToAddresses(payload.URLs)
+	payload.URLs = cloneStringSlice(normalized)
+	drainTurnCredsResult()
+	TurnCredsResultChan <- payload
 	log.Printf("[VK Auth] Account TURN creds received for link %s (urls=%d)", link, len(payload.URLs))
 }
 

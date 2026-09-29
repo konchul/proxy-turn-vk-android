@@ -26,6 +26,9 @@ func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "DTLS адрес")
 	listenDirect := flag.String("listen-direct", "", "адрес для клиентов без DTLS (RTP-obfs AEAD напрямую); пусто = выключено")
 	listenRaw := flag.String("listen-raw", "", "адрес для raw-IP клиентов без WireGuard (свой TUN/NAT); пусто = выключено")
+	listenRawAES := flag.String("listen-raw-aes", "", "raw-листенер с новым протоколом (AES-256-GCM obfs, AES-NI); старые клиенты его не понимают; пусто = выключено")
+	rawMTUFlag := flag.Int("raw-mtu", 1400, "MTU raw-режима (1400: audio 1453 / video 1489 на проводе, влезает в Ethernet 1500)")
+	tunGSO := flag.Bool("tun-gso", false, "raw-TUN с IFF_VNET_HDR: GSO-суперкадры на даунлинке, GRO на аплинке (фолбэк на обычный режим, если offload недоступен)")
 	adminListen := flag.String("admin-listen", "", "HTTPS адрес admin API; пусто = выключено")
 	adminTokenFile := flag.String("admin-token-file", "", "файл токена admin API")
 	adminCert := flag.String("admin-cert", "", "TLS сертификат admin API")
@@ -75,8 +78,8 @@ func main() {
 				}
 			} else {
 				cancel()
+				flushRawDeviceTraffic()
 				dbMutex.Lock()
-				flushRawDeviceTrafficLocked()
 				saveDB()
 				dbMutex.Unlock()
 				time.Sleep(2 * time.Second)
@@ -173,7 +176,7 @@ func main() {
 		log.Fatalf("[WRAP] нет активных паролей для WRAP")
 	}
 
-	wrapListener, err := listenWrapped(addr, serverWrapKeys)
+	wrapListener, err := listenWrapped(addr, serverWrapKeys, false)
 	if err != nil {
 		log.Fatalf("[WRAP] %v", err)
 	}
@@ -200,7 +203,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("[DIRECT] адрес: %v", err)
 		}
-		directWrapListener, err := listenWrapped(directAddr, serverWrapKeys)
+		directWrapListener, err := listenWrapped(directAddr, serverWrapKeys, false)
 		if err != nil {
 			log.Fatalf("[DIRECT] %v", err)
 		}
@@ -232,43 +235,61 @@ func main() {
 	// Raw-IP (без WireGuard) листенер — свой TUN/NAT/подсеть. Полностью
 	// опционально: если флаг не передан, ничего не создаётся и не трогает
 	// существующие WG-пути (56000/-listen-direct).
-	if *listenRaw != "" {
-		router, err := newRawRouter()
+	if *listenRaw != "" || *listenRawAES != "" {
+		if *rawMTUFlag >= 576 && *rawMTUFlag <= 1500 {
+			rawMTU = *rawMTUFlag
+		}
+		router, err := newRawRouter(*tunGSO)
 		if err != nil {
 			log.Fatalf("[RAW] %v", err)
 		}
 
-		rawAddr, err := net.ResolveUDPAddr("udp", *listenRaw)
-		if err != nil {
-			log.Fatalf("[RAW] адрес: %v", err)
-		}
-		rawWrapListener, err := listenWrapped(rawAddr, serverWrapKeys)
-		if err != nil {
-			log.Fatalf("[RAW] %v", err)
-		}
-		context.AfterFunc(ctx, func() { rawWrapListener.Close() })
-		log.Printf("   RAW (без WireGuard, без DTLS): %s", *listenRaw)
-
-		go func() {
-			for {
-				pc, remoteAddr, acceptErr := rawWrapListener.Accept()
-				if acceptErr != nil {
-					select {
-					case <-ctx.Done():
-						return
-					default:
-					}
-					continue
-				}
-				wg.Add(1)
-				go func(pc net.PacketConn, addr net.Addr) {
-					defer wg.Done()
-					c := &directConn{pc: pc, addr: addr}
-					defer c.Close()
-					handleConnRaw(ctx, c, router)
-				}(pc, remoteAddr)
+		// serveRaw — accept-цикл одного raw-листенера; шифр задаётся
+		// листенером (ChaCha для совместимости, AES-GCM для нового протокола).
+		serveRaw := func(listenAddr string, c obfsCipher, tag string) {
+			rawAddr, err := net.ResolveUDPAddr("udp", listenAddr)
+			if err != nil {
+				log.Fatalf("[RAW] адрес: %v", err)
 			}
-		}()
+			// raw-путь без DTLS — включаем батчинг syscalls (recvmmsg/sendmmsg)
+			rawWrapListener, err := listenWrappedCipher(rawAddr, serverWrapKeys, true, c)
+			if err != nil {
+				log.Fatalf("[RAW] %v", err)
+			}
+			context.AfterFunc(ctx, func() { rawWrapListener.Close() })
+			log.Printf("   RAW %s (без WireGuard, без DTLS): %s", tag, listenAddr)
+
+			go func() {
+				for {
+					pc, remoteAddr, acceptErr := rawWrapListener.Accept()
+					if acceptErr != nil {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+						continue
+					}
+					wg.Add(1)
+					go func(pc net.PacketConn, addr net.Addr) {
+						defer wg.Done()
+						c := &directConn{pc: pc, addr: addr}
+						defer c.Close()
+						handleConnRaw(ctx, c, router)
+					}(pc, remoteAddr)
+				}
+			}()
+		}
+
+		if *listenRaw != "" {
+			serveRaw(*listenRaw, obfsChaCha20, "chacha")
+		}
+		if *listenRawAES != "" {
+			// Новый протокол (AES-256-GCM, AES-NI): старые клиенты этот порт
+			// не понимают — рукопожатие у них не пройдёт. Остальные порты
+			// работают по-старому.
+			serveRaw(*listenRawAES, obfsAESGCM, "aesgcm")
+		}
 	}
 
 	log.Println("[SERVER] Готов")

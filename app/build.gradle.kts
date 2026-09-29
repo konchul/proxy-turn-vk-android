@@ -19,7 +19,7 @@ android {
     compileSdk = 35
     
     defaultConfig {
-        applicationId = "net.qwdtt.client"
+        applicationId = "ru.twentyseven.white"
         minSdk = 28
         targetSdk = 35
         versionCode = 42
@@ -154,6 +154,9 @@ tasks.register<Exec>("buildServerAsset") {
         "go",
         "build",
         "-trimpath",
+        // -s -w: без стрипа assets/server весит ~14 МБ вместо ~9.8 МБ,
+        // а APK уезжает на телефон целиком
+        "-ldflags=-s -w",
         "-o",
         rootDir.resolve("app/src/main/assets/server").absolutePath,
         "./server",
@@ -161,8 +164,14 @@ tasks.register<Exec>("buildServerAsset") {
 }
 
 tasks.named("preBuild").configure {
-    dependsOn("buildNativeLibs")
-    dependsOn("buildServerAsset")
+    val nativeLibExists = file("src/main/jniLibs/arm64-v8a/libclient.so").exists()
+    val serverAssetExists = file("src/main/assets/server").exists()
+    if (!nativeLibExists) {
+        dependsOn("buildNativeLibs")
+    }
+    if (!serverAssetExists) {
+        dependsOn("buildServerAsset")
+    }
 }
 
 dependencies {

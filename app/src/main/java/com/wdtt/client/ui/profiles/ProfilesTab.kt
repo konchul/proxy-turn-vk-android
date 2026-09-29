@@ -408,11 +408,15 @@ fun ProfilesTab(
         }
     }
 
-    // Автообработка URI если приложение открыли через файл
+    // Автообработка URI если приложение открыли через файл или ссылку
     LaunchedEffect(importFileUri) {
         val uri = importFileUri ?: return@LaunchedEffect
         try {
-            val text = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: ""
+            val text = if (uri.scheme == "27white" || uri.scheme == "qwdtt") {
+                uri.toString()
+            } else {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: ""
+            }
             val parsed = parseMultipleConfigs(text)
             if (parsed != null) {
                 if (parsed.profiles.size == 1) {
@@ -421,10 +425,10 @@ fun ProfilesTab(
                     scannedMultipleProfiles = parsed
                 }
             } else {
-                Toast.makeText(context, "Неверный формат файла", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Неверный формат конфигурации", Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
-            Toast.makeText(context, "Ошибка чтения файла: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Ошибка чтения: ${e.message}", Toast.LENGTH_SHORT).show()
         }
         onImportHandled()
     }
@@ -2043,10 +2047,14 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
     }
 
     // 1. Try URL scheme
-    if (trimmed.startsWith("qwdtt://config") || trimmed.startsWith("qwdtt:config")) {
+    if (trimmed.startsWith("qwdtt://config") || trimmed.startsWith("qwdtt:config") ||
+        trimmed.startsWith("27white://config") || trimmed.startsWith("27white:config")) {
         try {
-            val uri = android.net.Uri.parse(trimmed.replace("qwdtt:config", "qwdtt://config"))
-            val name = uri.getQueryParameter("name") ?: "QR Профиль"
+            val normalized = trimmed.replace("qwdtt:config", "qwdtt://config")
+                .replace("27white:config", "27white://config")
+                .replace("27white://config", "qwdtt://config")
+            val uri = android.net.Uri.parse(normalized)
+            val name = uri.getQueryParameter("name") ?: "27 White"
             val peerRaw = uri.getQueryParameter("peer") ?: return null
             val dtlsPortParam = uri.getQueryParameter("dtls_port") ?: uri.getQueryParameter("server_port")
             val peer = if (dtlsPortParam != null) {
@@ -2055,7 +2063,7 @@ private fun parseQrConfig(rawText: String): ConnectionProfile? {
                 peerRaw
             }
             val hashes = uri.getQueryParameter("hashes") ?: ""
-            val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: 18
+            val workers = 27
             val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 9000
             val pass = uri.getQueryParameter("pass") ?: ""
             return ConnectionProfile(

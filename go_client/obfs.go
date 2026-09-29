@@ -18,6 +18,7 @@
 package main
 
 import (
+	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
@@ -25,18 +26,38 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-var aeadCache sync.Map
+var aeadCache sync.Map // ключ: struct{cipher obfsCipher; key [wrapKeyLen]byte}
+
+// obfsCipher — AEAD-алгоритм obfs-слоя; фрейминг одинаков, отличается шифр.
+// ChaCha20 — исходный протокол (все порты, кроме 46000), AES-256-GCM — новый
+// (аппаратный AES на сервере и на телефонах с ARMv8 crypto extensions).
+type obfsCipher int
+
+const (
+	obfsChaCha20 obfsCipher = iota
+	obfsAESGCM
+)
+
+// activeObfsCipher выбирается в main.go по порту пира (46000 = AES).
+var activeObfsCipher = obfsChaCha20
 
 const replayWindowSpan = uint64(4096 * 961)
-const replayWindowMaxEntries = 8192
+const replaySlots = 8192 // степень двойки; в пакетах вдвое больше span (~4096)
 
+// replayWindow — анти-replay фильтр на кольце фиксированного размера: O(1)
+// на пакет, ноль аллокаций, без map-чисток (прежняя map[nonce]ts раз в 8192
+// пакета делала полный проход под локом — спайк задержки). ts сервера строго
+// монотонен по счётчику пакетов, поэтому extended-ts биективен пакету; слот
+// переиспользуется через 8192 пакета — дальше span, и такие повторы отсекает
+// span-проверка. accept() зовётся из единственного reader'а сессии.
 type replayWindow struct {
-	mu          sync.Mutex
-	seen        map[[12]byte]uint64
+	seen        [replaySlots]uint64 // extended ts последнего пакета в слоте
+	occupied    [replaySlots / 64]uint64
 	ssrc        uint32
 	highestTime uint64
 	initialized bool
@@ -47,21 +68,12 @@ func (w *replayWindow) accept(wire []byte) bool {
 		return false
 	}
 	ssrc := binary.BigEndian.Uint32(wire[8:12])
-	seq := binary.BigEndian.Uint16(wire[2:4])
 	ts := binary.BigEndian.Uint32(wire[4:8])
-	var nonce [12]byte
-	copy(nonce[:], obfsBuildNonce(ssrc, seq, ts))
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if !w.initialized {
 		w.ssrc = ssrc
 		w.highestTime = uint64(ts)
-		w.seen = make(map[[12]byte]uint64, 4096)
 		w.initialized = true
 	} else if w.ssrc != ssrc {
-		return false
-	}
-	if _, exists := w.seen[nonce]; exists {
 		return false
 	}
 	base := w.highestTime &^ uint64(0xffffffff)
@@ -74,38 +86,94 @@ func (w *replayWindow) accept(wire []byte) bool {
 	if extended+replayWindowSpan < w.highestTime {
 		return false
 	}
+	idx := int(extended & (replaySlots - 1))
+	word, bit := idx/64, uint(idx%64)
+	if w.occupied[word]&(1<<bit) != 0 && w.seen[idx] == extended {
+		return false // точный повтор
+	}
 	if extended > w.highestTime {
 		w.highestTime = extended
 	}
-	if len(w.seen) >= replayWindowMaxEntries {
-		cutoff := w.highestTime - min(w.highestTime, replayWindowSpan)
-		for value, packetTime := range w.seen {
-			if packetTime < cutoff {
-				delete(w.seen, value)
-			}
-		}
-		if len(w.seen) >= replayWindowMaxEntries {
-			return false
-		}
-	}
-	w.seen[nonce] = extended
+	w.seen[idx] = extended
+	w.occupied[word] |= 1 << bit
 	return true
 }
 
 func getAEAD(key []byte) (cipher.AEAD, error) {
+	return getAEADFor(key, activeObfsCipher)
+}
+
+func getAEADFor(key []byte, c obfsCipher) (cipher.AEAD, error) {
 	if len(key) != wrapKeyLen {
 		return nil, fmt.Errorf("obfs: key must be %d bytes", wrapKeyLen)
 	}
-	keyStr := string(key)
-	if val, ok := aeadCache.Load(keyStr); ok {
+	// Ключ кэша — массив, а не string(key): string конвертация аллоцировала
+	// на КАЖДЫЙ пакет горячего пути.
+	var ck = struct {
+		c obfsCipher
+		k [wrapKeyLen]byte
+	}{c, [wrapKeyLen]byte{}}
+	copy(ck.k[:], key)
+	if val, ok := aeadCache.Load(ck); ok {
 		return val.(cipher.AEAD), nil
 	}
-	aead, err := chacha20poly1305.New(key)
+	var aead cipher.AEAD
+	var err error
+	if c == obfsAESGCM {
+		block, blockErr := aes.NewCipher(key)
+		if blockErr != nil {
+			return nil, blockErr
+		}
+		aead, err = cipher.NewGCM(block)
+	} else {
+		aead, err = chacha20poly1305.New(key)
+	}
 	if err != nil {
 		return nil, err
 	}
-	aeadCache.Store(keyStr, aead)
+	aeadCache.Store(ck, aead)
 	return aead, nil
+}
+
+// ─── fastPRNG (несекретная случайность для padding) ───
+
+// fastPRNG — xorshift64* для несекретной случайности (длина и байты RTP-
+// padding — маскировочный шум, не криптоматериал). crypto/rand.Read здесь
+// стоил два getrandom-сисколла на каждый исходящий пакет — на телефоне это
+// заметный вклад в CPU и расход батареи.
+type fastPRNG struct {
+	state uint64
+}
+
+func newFastPRNG() fastPRNG {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		s := uint64(time.Now().UnixNano())
+		if s == 0 {
+			s = 0x853c49e6748fea9b
+		}
+		return fastPRNG{state: s}
+	}
+	s := binary.LittleEndian.Uint64(buf[:])
+	if s == 0 {
+		s = 0x853c49e6748fea9b
+	}
+	return fastPRNG{state: s}
+}
+
+func (p *fastPRNG) next() uint32 {
+	x := p.state
+	x ^= x >> 12
+	x ^= x << 25
+	x ^= x >> 27
+	p.state = x
+	return uint32((x * 0x2545F4914F6CDD1D) >> 32)
+}
+
+func (p *fastPRNG) fill(b []byte) {
+	for i := range b {
+		b[i] = byte(p.next())
+	}
 }
 
 // ─── Configuration ───
@@ -151,6 +219,7 @@ func normalizeObfsMode(mode string) string {
 // ObfsState tracks monotonically increasing RTP sequence number and timestamp using a 48-bit packet counter.
 type ObfsState struct {
 	mu      sync.Mutex
+	prng    fastPRNG
 	initSeq uint16
 	initTs  uint32
 	count   uint64
@@ -163,6 +232,7 @@ func NewObfsState() (*ObfsState, error) {
 		return nil, err
 	}
 	return &ObfsState{
+		prng:    newFastPRNG(),
 		initSeq: binary.BigEndian.Uint16(buf[0:2]),
 		initTs:  binary.BigEndian.Uint32(buf[2:6]),
 		count:   0,
@@ -171,16 +241,16 @@ func NewObfsState() (*ObfsState, error) {
 
 // ─── Nonce derivation ───
 
-// obfsBuildNonce deterministically builds a 12-byte AEAD nonce from RTP fields.
+// obfsFillNonce deterministically fills a 12-byte AEAD nonce from RTP fields
+// into the caller's stack buffer (прежняя obfsBuildNonce аллоцировала 12 байт
+// на каждый пакет в обе стороны).
 //
 //	[SSRC 4B][SeqNum 2B][0x00 0x00][Timestamp 4B]
-func obfsBuildNonce(ssrc uint32, seq uint16, ts uint32) []byte {
-	n := make([]byte, 12)
-	binary.BigEndian.PutUint32(n[0:4], ssrc)
-	binary.BigEndian.PutUint16(n[4:6], seq)
-	// n[6], n[7] = 0x00 — zero padding for unique nonce space
-	binary.BigEndian.PutUint32(n[8:12], ts)
-	return n
+func obfsFillNonce(nonce *[12]byte, ssrc uint32, seq uint16, ts uint32) {
+	binary.BigEndian.PutUint32(nonce[0:4], ssrc)
+	binary.BigEndian.PutUint16(nonce[4:6], seq)
+	// nonce[6], nonce[7] = 0x00 — zero padding for unique nonce space
+	binary.BigEndian.PutUint32(nonce[8:12], ts)
 }
 
 // rtpHeaderLenFull is the base 12-byte RTP header plus a one-byte-header RTP
@@ -201,6 +271,13 @@ const (
 //
 //	[V=2,P=1,X=0,CC=0 | PT | SeqNum | Timestamp | SSRC | encrypted_payload | padding | padLen]
 func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]byte, error) {
+	return obfsWrapPacketBuf(key, payload, cfg, state, nil)
+}
+
+// obfsWrapPacketBuf — вариант с переиспользуемым выходным буфером: горячий
+// путь (обёртка каждого пакета) раньше аллоцировал out заново. dst=nil
+// аллоцирует как раньше.
+func obfsWrapPacketBuf(key, payload []byte, cfg *ObfsConfig, state *ObfsState, dst []byte) ([]byte, error) {
 	if len(key) != wrapKeyLen {
 		return nil, fmt.Errorf("obfs: key must be %d bytes (got %d)", wrapKeyLen, len(key))
 	}
@@ -216,17 +293,14 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 	seq := state.initSeq + uint16(c)
 	ts := state.initTs + uint32(c)*960 + uint32(c>>16)
 
-	// Build nonce from RTP fields
-	nonce := obfsBuildNonce(cfg.SSRC, seq, ts)
+	// Build nonce from RTP fields (на стеке)
+	var nonce [12]byte
+	obfsFillNonce(&nonce, cfg.SSRC, seq, ts)
 
-	// Determine padding
+	// Determine padding (несекретная случайность — fastPRNG)
 	padRand := 0
 	if cfg.PaddingMax > 0 {
-		var rndBuf [1]byte
-		if _, err := rand.Read(rndBuf[:]); err != nil {
-			return nil, fmt.Errorf("obfs: padding random: %w", err)
-		}
-		padRand = int(rndBuf[0]) % cfg.PaddingMax
+		padRand = int(state.prng.next()) % cfg.PaddingMax
 	}
 	padTotal := padRand + 1 // +1 for the length byte itself
 
@@ -234,7 +308,12 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 
 	// Allocate output: header + payload + AEAD tag + padTotal
 	outLen := headerLen + len(payload) + chacha20poly1305.Overhead + padTotal
-	out := make([]byte, outLen)
+	out := dst
+	if cap(out) < outLen {
+		out = make([]byte, outLen)
+	} else {
+		out = out[:outLen]
+	}
 
 	// RTP Header (12 bytes, no extension).
 	// Byte 0 bit layout: V(2) P(1) X(1) CC(4) — masks 0xC0/0x20/0x10/0x0F.
@@ -248,14 +327,12 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("obfs: cipher init: %w", err)
 	}
-	sealed := aead.Seal(out[headerLen:headerLen], nonce, payload, out[:headerLen])
+	sealed := aead.Seal(out[headerLen:headerLen], nonce[:], payload, out[:headerLen])
 
 	// Random padding bytes
 	padStart := headerLen + len(sealed)
 	if padRand > 0 {
-		if _, err := rand.Read(out[padStart : padStart+padRand]); err != nil {
-			return nil, fmt.Errorf("obfs: padding bytes: %w", err)
-		}
+		state.prng.fill(out[padStart : padStart+padRand])
 	}
 
 	// Last byte = total padding count (RFC 3550 §5.1)
@@ -317,13 +394,14 @@ func obfsUnwrapPacket(key, wire, dst []byte) (int, error) {
 		return 0, errors.New("obfs: dst buffer too small")
 	}
 
-	// Build nonce and decrypt
-	nonce := obfsBuildNonce(ssrc, seq, ts)
+	// Build nonce and decrypt (на стеке)
+	var nonce [12]byte
+	obfsFillNonce(&nonce, ssrc, seq, ts)
 	aead, err := getAEAD(key)
 	if err != nil {
 		return 0, fmt.Errorf("obfs: cipher init: %w", err)
 	}
-	plain, err := aead.Open(dst[:0], nonce, wire[headerLen:payloadEnd], wire[:headerLen])
+	plain, err := aead.Open(dst[:0], nonce[:], wire[headerLen:payloadEnd], wire[:headerLen])
 	if err != nil {
 		return 0, fmt.Errorf("obfs: auth: %w", err)
 	}

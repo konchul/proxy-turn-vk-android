@@ -1,57 +1,24 @@
-# ===== Gradle =====
-.gradle/
-build/
+# Секреты и локальное — НИКОГДА не коммитить
 local.properties
-
-# ===== Android =====
-*.apk
-*.aab
-*.ap_
-*.dex
-*.class
-app/build/
-app/release/
-
-# ===== Go =====
-go.sum
-
-# ===== Native Libraries (compiled) =====
-*.so
-*.dll
-*.dylib
-jniLibs/
-app/src/main/jniLibs/
-
-# ===== Server binary =====
-app/src/main/assets/server
-
-# ===== Keystore / Secrets =====
+release.keystore
 *.keystore
 *.jks
-*.key
-*.pem
+docs/wdtt-snat-fix.md
+*.password*
+passwords.json
+admin.token
 
-# ===== IDE =====
-.idea/
-*.iml
-.vscode/
-*.swp
-*.swo
-*~
-
-# ===== OS =====
-.DS_Store
-Thumbs.db
-Desktop.ini
-
-# ===== Misc =====
-*.log
-*.tmp
-*.bak
-msg.txt
-*.bat
-wdtt-server
-wg-turn-client
+# Сборка
+build/
+.gradle/
 .kotlin/
-.keys/
-.gradle-home/
+app/build/
+app/src/main/jniLibs/
+app/src/main/assets/server
+bin/
+*.apk
+*.aab
+
+# Прочее
+*.log
+.idea/

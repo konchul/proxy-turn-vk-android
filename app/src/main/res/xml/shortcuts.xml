@@ -9,7 +9,7 @@
         <intent
             android:action="com.wdtt.client.shortcut.START_TUNNEL"
             android:targetClass="com.wdtt.client.MainActivity"
-            android:targetPackage="net.qwdtt.client" />
+            android:targetPackage="ru.twentyseven.white" />
     </shortcut>
     <shortcut
         android:shortcutId="shortcut_stop_tunnel"
@@ -20,6 +20,6 @@
         <intent
             android:action="com.wdtt.client.shortcut.STOP_TUNNEL"
             android:targetClass="com.wdtt.client.MainActivity"
-            android:targetPackage="net.qwdtt.client" />
+            android:targetPackage="ru.twentyseven.white" />
     </shortcut>
 </shortcuts>

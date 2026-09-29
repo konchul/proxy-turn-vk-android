@@ -236,6 +236,13 @@ func main() {
 		log.Fatalf("[КЛИЕНТ] Ошибка разбора пира: %v", err)
 	}
 
+	// Новый протокол (AES-256-GCM obfs): сервер слушает его на порту 46000.
+	// Порт пира — маркер шифра: остальное (фрейминг, ключи) идентично.
+	if peer.Port == 46000 {
+		activeObfsCipher = obfsAESGCM
+		log.Printf("[КЛИЕНТ] Obfs-шифр: AES-256-GCM (порт 46000)")
+	}
+
 	if len(hashes) == 0 {
 		log.Fatal("[КЛИЕНТ] Нет хешей VK")
 	}

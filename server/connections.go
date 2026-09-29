@@ -357,6 +357,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			// handleConnRaw. WireGuard-пакеты всегда начинаются с байта
 			// типа сообщения 1-4, никогда не 0xFF.
 			if nn > 0 && (*b)[0] == 0xFF {
+				clientConn.Write((*b)[:1]) // keepalive pong (см. raw.go)
 				continue
 			}
 			atomic.AddInt64(&totalBytesFromClient, int64(nn))

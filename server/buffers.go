@@ -6,7 +6,8 @@ import "sync"
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, 1600)
+		// 1600 под пакет + vnetHdrLen под virtio-заголовок (gso-режим raw-TUN)
+		b := make([]byte, vnetHdrLen+1600)
 		return &b
 	},
 }

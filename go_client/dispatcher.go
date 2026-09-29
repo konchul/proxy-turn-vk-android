@@ -87,21 +87,23 @@ type WorkerSlot struct {
 }
 
 type Dispatcher struct {
-	localConn    net.PacketConn
-	tunFile      *os.File // не nil в -mode rawtun: сырые IP-пакеты вместо локального WG-loopback
-	ready        chan struct{}
-	clientAddr   atomic.Pointer[net.Addr]
-	mu           sync.Mutex
-	workers      []*WorkerSlot
-	rrIndex      int
-	rrCount      int   // сколько пакетов отправлено в текущий worker в рамках текущего chunk'а
-	lastPktTime  int64 // unix millis последнего пакета — для сброса chunk'а после паузы
-	chunkStartTs int64 // unix millis начала текущего chunk'а — для maxDwellMS
-	ReturnCh     chan []byte
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	stats        *Stats
+	localConn  net.PacketConn
+	tunFile    *os.File // не nil в -mode rawtun: сырые IP-пакеты вместо локального WG-loopback
+	ready      chan struct{}
+	clientAddr atomic.Pointer[net.Addr]
+	// mu сериализует ТОЛЬКО писателей снапшота воркеров (Register/Unregister —
+	// редкие события). Горячий путь читает снапшот через workersSnap без лока.
+	mu            sync.Mutex
+	workers       atomic.Pointer[[]*WorkerSlot]
+	rrIndex       int
+	rrCount       int   // сколько пакетов отправлено в текущий worker в рамках текущего chunk'а
+	lastPktTime   int64 // unix millis последнего пакета — для сброса chunk'а после паузы
+	chunkStartTs  int64 // unix millis начала текущего chunk'а — для maxDwellMS
+	ReturnCh      chan []byte
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	stats         *Stats
 	firstPktUp    uint32
 	firstPktDown  uint32
 	firstReadErr  uint32
@@ -172,27 +174,35 @@ func (d *Dispatcher) Shutdown() {
 
 func (d *Dispatcher) Register(w *WorkerSlot) {
 	d.mu.Lock()
-	d.workers = append(d.workers, w)
-	count := len(d.workers)
+	var old []*WorkerSlot
+	if cur := d.workers.Load(); cur != nil {
+		old = *cur
+	}
+	next := make([]*WorkerSlot, len(old)+1)
+	copy(next, old)
+	next[len(old)] = w
+	d.workers.Store(&next)
+	count := len(next)
 	d.mu.Unlock()
 	log.Printf("[ДИСП] Воркер #%d зарегистрирован (всего: %d)", w.ID, count)
 }
 
 func (d *Dispatcher) Unregister(slot *WorkerSlot) {
 	d.mu.Lock()
-	for i, w := range d.workers {
-		if w == slot {
-			d.workers = append(d.workers[:i], d.workers[i+1:]...)
-			break
+	var next []*WorkerSlot
+	if cur := d.workers.Load(); cur != nil {
+		next = make([]*WorkerSlot, 0, len(*cur))
+		for _, w := range *cur {
+			if w != slot {
+				next = append(next, w)
+			}
 		}
+		d.workers.Store(&next)
 	}
-	remaining := len(d.workers)
-	// Подстраховка: если текущий rrIndex вылез за границу после удаления
-	if d.rrIndex >= remaining && remaining > 0 {
-		d.rrIndex = d.rrIndex % remaining
-	}
-	d.rrCount = 0
+	remaining := len(next)
 	d.mu.Unlock()
+	// rrIndex/rrCount здесь НЕ трогаем: их пишет только readLoop, и все
+	// использования имеют % nw — выход за границу после удаления невозможен.
 	log.Printf("[ДИСП] Воркер #%d отключён (осталось: %d)", slot.ID, remaining)
 }
 
@@ -276,10 +286,17 @@ func (d *Dispatcher) readLoop() {
 		copy(pkt, buf[:n])
 		pktSize := n
 
-		d.mu.Lock()
-		nw := len(d.workers)
+		// Снапшот воркеров (copy-on-write): без мьютекса на каждый пакет.
+		// rrIndex/rrCount/chunkStartTs/lastPktTime пишет только readLoop —
+		// гонок нет по построению.
+		ws := d.workers.Load()
+		if ws == nil {
+			putPktBuf(pkt)
+			continue
+		}
+		workers := *ws
+		nw := len(workers)
 		if nw == 0 {
-			d.mu.Unlock()
 			putPktBuf(pkt)
 			continue
 		}
@@ -302,13 +319,13 @@ func (d *Dispatcher) readLoop() {
 			idx := d.rrIndex % nw
 			sentPrio := false
 			select {
-			case d.workers[idx].PrioCh <- pkt:
+			case workers[idx].PrioCh <- pkt:
 				sentPrio = true
 			default:
 				for i := 1; i < nw; i++ {
 					alt := (idx + i) % nw
 					select {
-					case d.workers[alt].PrioCh <- pkt:
+					case workers[alt].PrioCh <- pkt:
 						sentPrio = true
 					default:
 					}
@@ -321,7 +338,6 @@ func (d *Dispatcher) readLoop() {
 				if d.tunFile != nil {
 					atomic.AddUint64(&d.tunSentCount, 1)
 				}
-				d.mu.Unlock()
 				continue
 			}
 			// Все приоритетные каналы заняты — падаем в обычную очередь ниже.
@@ -343,7 +359,7 @@ func (d *Dispatcher) readLoop() {
 		idx := d.rrIndex % nw
 
 		// Пробуем текущий worker (chunk affinity)
-		w := d.workers[idx]
+		w := workers[idx]
 		select {
 		case w.SendCh <- pkt:
 			sent = true
@@ -358,7 +374,7 @@ func (d *Dispatcher) readLoop() {
 			for i := 1; i < nw; i++ {
 				altIdx := (idx + i) % nw
 				select {
-				case d.workers[altIdx].SendCh <- pkt:
+				case workers[altIdx].SendCh <- pkt:
 					sent = true
 					d.rrIndex = altIdx
 					d.rrCount = 1 // первый пакет нового chunk'а уже отправлен
@@ -387,7 +403,6 @@ func (d *Dispatcher) readLoop() {
 				}
 			}
 		}
-		d.mu.Unlock()
 	}
 }
 
