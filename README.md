@@ -1,4 +1,4 @@
-# 27 White (WDTT fork)
+# qWDTT — optimized WDTT fork
 
 Оптимизированный форк [proxy-turn-vk-android](https://github.com/amurcanov/proxy-turn-vk-android):
 VPN-клиент и сервер, маскирующие трафик под RTP-поток VK-звонков.
