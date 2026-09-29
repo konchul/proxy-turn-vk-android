@@ -169,11 +169,15 @@ class SettingsStore(context: Context) {
         }
 
         fun normalizeObfsMode(mode: String?): String {
-            return if (mode.equals("audio", ignoreCase = true)) "audio" else "video"
+            return if (mode.equals("video", ignoreCase = true)) "video" else "audio"
         }
 
         fun normalizeConnectionMode(mode: String?): String {
-            return CONNECTION_MODE_RAWTUN
+            return when {
+                mode.equals(CONNECTION_MODE_SOCKS, ignoreCase = true) -> CONNECTION_MODE_SOCKS
+                mode.equals(CONNECTION_MODE_RAWTUN, ignoreCase = true) -> CONNECTION_MODE_RAWTUN
+                else -> CONNECTION_MODE_VPN
+            }
         }
 
         fun normalizeSocksPort(port: Int): Int = port.coerceIn(1, 65535)
@@ -318,7 +322,7 @@ class SettingsStore(context: Context) {
     val vkHashes: Flow<String> = dataStore.data.map { it[VK_HASHES] ?: "" }
     val globalVkHashes: Flow<String> = appContext.dataStore.data.map { it[GLOBAL_VK_HASHES] ?: "" }
     val secondaryVkHash: Flow<String> = appContext.dataStore.data.map { it[SECONDARY_VK_HASH] ?: "" }
-    val workersPerHash: Flow<Int> = dataStore.data.map { 27 }
+    val workersPerHash: Flow<Int> = dataStore.data.map { it[WORKERS_PER_HASH] ?: 9 }
     val protocol: Flow<String> = dataStore.data.map { it[PROTOCOL] ?: "udp" }
     val listenPort: Flow<Int> = dataStore.data.map { it[LISTEN_PORT] ?: 9000 }
     val manualPortsEnabled: Flow<Boolean> = dataStore.data.map { it[MANUAL_PORTS_ENABLED] ?: false }
@@ -327,13 +331,13 @@ class SettingsStore(context: Context) {
     /** Требует сервер с флагом -listen-direct и совместимую версию сервера. */
     val noDtlsEnabled: Flow<Boolean> = dataStore.data.map { it[NO_DTLS_ENABLED] ?: false }
     val serverDirectPort: Flow<Int> = dataStore.data.map { it[SERVER_DIRECT_PORT] ?: 56002 }
-    val serverRawPort: Flow<Int> = dataStore.data.map { it[SERVER_RAW_PORT] ?: 46000 }
+    val serverRawPort: Flow<Int> = dataStore.data.map { it[SERVER_RAW_PORT] ?: 56003 }
     /** Raw AES: raw-режим поверх нового протокола (порт 46000, AES-256-GCM). */
-    val rawAesMode: Flow<Boolean> = dataStore.data.map { it[RAW_AES_MODE] ?: true }
+    val rawAesMode: Flow<Boolean> = dataStore.data.map { it[RAW_AES_MODE] ?: false }
     /** AES-порт, задеплоенный на сервере (для авто-подстановки при выборе AES). */
     val serverAesPort: Flow<Int> = dataStore.data.map { it[SERVER_AES_PORT] ?: 46000 }
-    /** TURN-relay по TCP вместо UDP — обход UDP-душения на некоторых сетях (напр. Ростелеком). По умолчанию выключено. */
-    val turnTcpEnabled: Flow<Boolean> = dataStore.data.map { it[TURN_TCP_ENABLED] ?: false }
+    /** TURN-relay по TCP вместо UDP — обход UDP-душения на некоторых сетях (напр. Ростелеком). По умолчанию включено. */
+    val turnTcpEnabled: Flow<Boolean> = dataStore.data.map { it[TURN_TCP_ENABLED] ?: true }
     val sni: Flow<String> = dataStore.data.map { it[SNI] ?: "" }
 
     val deployIp: Flow<String> = dataStore.data.map { it[DEPLOY_IP] ?: "" }

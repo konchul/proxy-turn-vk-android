@@ -98,7 +98,7 @@ class TunnelService : Service() {
                         val serverRawPort = when {
                             store.rawAesMode.first() -> 46000
                             manualPortsEnabled -> store.serverRawPort.first()
-                            else -> 46000
+                            else -> 56003
                         }
                         val effectiveServerPort = when {
                             isRawTun -> serverRawPort
@@ -210,7 +210,7 @@ class TunnelService : Service() {
                 val serverRawPort = when {
                     store.rawAesMode.first() -> 46000
                     manualPortsEnabled -> store.serverRawPort.first()
-                    else -> 46000
+                    else -> 56003
                 }
                 val effectiveServerPort = when {
                     isRawTunRestore -> serverRawPort
@@ -731,7 +731,7 @@ class TunnelService : Service() {
         )
 
         return NotificationCompat.Builder(this, TUNNEL_NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("27 White")
+            .setContentTitle("qWDTT")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat_connected)
             .setOngoing(true)

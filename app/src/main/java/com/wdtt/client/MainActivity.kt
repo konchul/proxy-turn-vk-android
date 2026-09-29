@@ -63,8 +63,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.wdtt.client.ui.AppUpdateDialog
 import com.wdtt.client.ui.SupportNoticeDialog
 import com.wdtt.client.ui.ProfilesTab
@@ -264,6 +262,9 @@ private data class NavItem(
 
 private val navItems = listOf(
     NavItem(0, "Туннель", Icons.Filled.VpnKey, Icons.Outlined.VpnKey),
+    NavItem(1, "Серверы", Icons.Filled.Cloud, Icons.Outlined.Cloud),
+    NavItem(2, "Профили", Icons.Filled.FolderOpen, Icons.Outlined.Folder),
+    NavItem(3, "Обход", Icons.Filled.FilterList, Icons.Outlined.FilterList),
     NavItem(4, "Логи", Icons.Filled.Terminal, Icons.Outlined.Terminal),
 )
 
@@ -286,8 +287,6 @@ fun MainScreen(
     val context = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    val profilesStore = remember { ProfilesStore(context) }
-    val profiles by profilesStore.profiles.collectAsStateWithLifecycle(initialValue = null)
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var dragTargetIndex by remember { mutableIntStateOf(-1) }
     var dragProgress by remember { mutableFloatStateOf(0f) }
@@ -299,7 +298,9 @@ fun MainScreen(
     val isAdminInterface = interfaceRole == "admin"
     val autoSwitchToLogs by settingsStore.autoSwitchToLogs.collectAsStateWithLifecycle(initialValue = true)
     var pendingSwitchToLogs by remember { mutableStateOf(false) }
-    val activeNavItems = remember { navItems }
+    val activeNavItems = remember(isAdminInterface) {
+        navItems.filter { isAdminInterface || it.id != 1 }
+    }
     var pendingRelease by remember { mutableStateOf<AppReleaseInfo?>(null) }
     var showSupportNotice by remember { mutableStateOf(false) }
     val currentVersion = remember { "v${BuildConfig.VERSION_NAME.removePrefix("v")}" }
@@ -332,31 +333,21 @@ fun MainScreen(
     val pendingFileUri = MainActivity.pendingFileUri.value
     LaunchedEffect(pendingFileUri) {
         if (pendingFileUri != null) {
-            try {
-                val text = if (pendingFileUri.scheme == "27white" || pendingFileUri.scheme == "qwdtt") {
-                    pendingFileUri.toString()
-                } else {
-                    context.contentResolver.openInputStream(pendingFileUri)?.bufferedReader()?.readText() ?: ""
-                }
-                val parsed = SubscriptionImport.parsePayload(text)
-                if (parsed != null && parsed.profiles.isNotEmpty()) {
-                    val p = parsed.profiles.first()
-                    profilesStore.saveProfile(p)
-                    profilesStore.applyProfile(context, p.id)
-                    Toast.makeText(context, "Профиль «${p.name}» успешно подключен!", Toast.LENGTH_SHORT).show()
-                    MainActivity.pendingFileUri.value = null
-                    selectedTab = 0
-                } else {
-                    selectedTab = 2
-                }
-            } catch (e: Exception) {
-                Log.e("WDTT", "Error auto-importing uri: ${e.message}")
-                selectedTab = 2
-            }
+            selectedTab = 2
         }
     }
 
     var requestCreateProfile by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val supportShownFor = settingsStore.supportNoticeShownVersionCode.first()
+        val currentCode = BuildConfig.VERSION_CODE
+        if (currentCode >= SettingsStore.SUPPORT_NOTICE_VERSION_CODE &&
+            supportShownFor < SettingsStore.SUPPORT_NOTICE_VERSION_CODE
+        ) {
+            showSupportNotice = true
+        }
+    }
 
     // Тихое автообновление подписок при открытии (не во время туннеля).
     LaunchedEffect(Unit) {
@@ -569,6 +560,110 @@ fun MainScreen(
 
     }
 
+    if (!hasSeenWelcomeDialog) {
+        AlertDialog(
+            onDismissRequest = { 
+                scope.launch { settingsStore.saveHasSeenWelcomeDialog(true) }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Готовые профили",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "Вы можете получить готовые конфиги напрямую в этих Telegram-ботах:",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/darkbit_vpnbot"))
+                                context.startActivity(intent)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(vertical = 10.dp)
+                        ) {
+                            Text(
+                                "🤖 @darkbit_vpnbot",
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/sidylinkbot"))
+                                context.startActivity(intent)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(vertical = 10.dp)
+                        ) {
+                            Text(
+                                "🤖 @sidylinkbot",
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Следите за обновлениями",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "Все дальнейшие обновления и новости мы будем публиковать в нашем канале:",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Button(
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(AppLinks.TELEGRAM_CHANNEL))
+                            context.startActivity(intent)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(vertical = 10.dp)
+                    ) {
+                        Text("📢 @darkbitVPN", style = MaterialTheme.typography.labelLarge)
+                    }
+                    Text(
+                        "Просто скопируйте текст профиля или конфигурационный файл и импортируйте его на вкладке «Профили». Эта памятка также доступна в настройках.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { scope.launch { settingsStore.saveHasSeenWelcomeDialog(true) } }
+                ) {
+                    Text("Понятно")
+                }
+            }
+        )
+    }
+
     pendingRelease?.let { release ->
         AppUpdateDialog(
             release = release,
@@ -592,169 +687,11 @@ fun MainScreen(
         )
     }
 
-    val requireConfig = profiles != null && profiles!!.isEmpty()
-    if (requireConfig) {
-        RequireConfigDialog(
-            onImportSuccess = { configText ->
-                scope.launch {
-                    val parsed = SubscriptionImport.parsePayload(configText)
-                    if (parsed != null && parsed.profiles.isNotEmpty()) {
-                        val p = parsed.profiles.first()
-                        profilesStore.saveProfile(p)
-                        profilesStore.applyProfile(context, p.id)
-                        Toast.makeText(context, "Профиль «${p.name}» успешно подключен!", Toast.LENGTH_SHORT).show()
-                        selectedTab = 0
-                    }
-                }
-            }
+    if (showSupportNotice) {
+        SupportNoticeDialog(
+            versionName = BuildConfig.VERSION_NAME,
+            onDismiss = { dismissSupportNotice() },
         )
-    }
-}
-
-@Composable
-fun RequireConfigDialog(
-    onImportSuccess: (String) -> Unit
-) {
-    var inputUrl by remember { mutableStateOf("") }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    val context = LocalContext.current
-    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
-    val activity = context as? android.app.Activity
-
-    LaunchedEffect(Unit) {
-        val clipText = clipboardManager.getText()?.text?.trim() ?: ""
-        if (clipText.startsWith("27white://") || clipText.startsWith("qwdtt://")) {
-            inputUrl = clipText
-        }
-    }
-
-    Dialog(
-        onDismissRequest = {
-            // Cannot dismiss by clicking outside or back button
-        },
-        properties = DialogProperties(
-            dismissOnBackPress = false,
-            dismissOnClickOutside = false,
-            usePlatformDefaultWidth = false
-        )
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .wrapContentHeight()
-                .padding(16.dp),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.size(56.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Filled.VpnKey,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-                }
-
-                Text(
-                    text = "Подключение 27 White",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-
-                Text(
-                    text = "Для работы приложения необходима ссылка подключения (27white:// или qwdtt://).\n\nПолучите ссылку в Telegram-боте @vpnclub27bot в разделе «⚪ Обход белых списков» и вставьте её ниже:",
-                    fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    lineHeight = 20.sp
-                )
-
-                OutlinedTextField(
-                    value = inputUrl,
-                    onValueChange = {
-                        inputUrl = it
-                        errorMessage = null
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Ссылка подключения") },
-                    placeholder = { Text("27white://config?...") },
-                    singleLine = false,
-                    maxLines = 3,
-                    shape = RoundedCornerShape(12.dp),
-                    trailingIcon = {
-                        IconButton(onClick = {
-                            val clipText = clipboardManager.getText()?.text?.trim() ?: ""
-                            if (clipText.isNotEmpty()) {
-                                inputUrl = clipText
-                                errorMessage = null
-                            }
-                        }) {
-                            Icon(
-                                imageVector = Icons.Filled.Cloud,
-                                contentDescription = "Вставить",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                )
-
-                if (errorMessage != null) {
-                    Text(
-                        text = errorMessage!!,
-                        color = MaterialTheme.colorScheme.error,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-
-                Button(
-                    onClick = {
-                        val trimmed = inputUrl.trim()
-                        if (trimmed.isEmpty()) {
-                            errorMessage = "Пожалуйста, вставьте ссылку подключения"
-                            return@Button
-                        }
-                        val parsed = SubscriptionImport.parsePayload(trimmed)
-                        if (parsed == null || parsed.profiles.isEmpty()) {
-                            errorMessage = "Неверная ссылка. Ссылка должна начинаться с 27white:// или qwdtt://"
-                            return@Button
-                        }
-                        onImportSuccess(trimmed)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text("Импортировать и подключить", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                }
-
-                TextButton(
-                    onClick = {
-                        activity?.finish()
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Выйти из приложения", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
     }
 }
 

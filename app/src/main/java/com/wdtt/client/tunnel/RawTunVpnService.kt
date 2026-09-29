@@ -54,7 +54,7 @@ class RawTunVpnService : VpnService() {
 
         val builder = Builder()
         runCatching {
-            builder.setSession("27 White")
+            builder.setSession("qWDTT-raw")
             diag("Builder.setSession OK")
         }.onFailure { diag("Builder.setSession FAILED: ${it}", isError = true) }
 

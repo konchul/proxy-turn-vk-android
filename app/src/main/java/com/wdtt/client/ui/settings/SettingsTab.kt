@@ -550,6 +550,22 @@ fun SettingsTabContent(
     }
 
     // ═══ Dialogs ═══
+    if (showSecretsDialog) {
+        SecretsDialog(
+            settingsStore = settingsStore,
+            initialPassword = savedConnectionPassword,
+            initialServerDtlsPort = serverDtlsPortInput,
+            initialServerWgPort = serverWgPortInput,
+            initialLocalPort = portInput,
+            onSaved = { dtls, wg, local ->
+                serverDtlsPortInput = dtls
+                serverWgPortInput = wg
+                portInput = local
+            },
+            onDismiss = { showSecretsDialog = false }
+        )
+    }
+
     if (showHashesDialog) {
         val activeParts = currentHashesRaw.split(Regex("[,\\s\\n]+")).filter { it.isNotEmpty() }
         val captchaModeForCheck by settingsStore.captchaMode.collectAsStateWithLifecycle(initialValue = "auto")
@@ -1176,10 +1192,260 @@ fun SettingsTabContent(
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            "Режим: Raw TUN (UDP, маскировка видеопотока 27 White)",
+                            "Оба варианта — полноценный VPN (весь трафик через туннель), отличается только " +
+                                "транспортный протокол. WireGuard — основной, проверенный. Raw — без " +
+                                "WireGuard вообще, эксперимент, нужен сервер с -listen-raw. SOCKS5 — без " +
+                                "VPN-разрешения, прокси вручную.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = connectionMode == SettingsStore.CONNECTION_MODE_VPN,
+                                onClick = {
+                                    if (!tunnelRunning) {
+                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_VPN) }
+                                    }
+                                },
+                                label = { Text("WG") },
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN,
+                                onClick = {
+                                    if (!tunnelRunning) {
+                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_RAWTUN) }
+                                    }
+                                },
+                                label = { Text("Raw") },
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = connectionMode == SettingsStore.CONNECTION_MODE_SOCKS,
+                                onClick = {
+                                    if (!tunnelRunning) {
+                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_SOCKS) }
+                                    }
+                                },
+                                label = { Text("SOCKS5") },
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN) {
+                            Text(
+                                "Требует сервер, собранный с -listen-raw. Несовместим со старыми " +
+                                    "серверами — если Raw не подключается, используйте режим WG.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            // Тип шифрования raw-протокола. Порт меняется автоматически:
+                            // ChaCha20 -> 56003 (-listen-raw), AES-256-GCM -> 46000 (-listen-raw-aes).
+                            Text(
+                                "Тип шифрования",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(
+                                    selected = !rawAesMode,
+                                    onClick = {
+                                        if (!tunnelRunning) {
+                                            scope.launch {
+                                                settingsStore.saveRawAesMode(false)
+                                                settingsStore.saveServerRawPort(56003)
+                                            }
+                                        }
+                                    },
+                                    label = { Text("ChaCha20 · 56003") },
+                                    enabled = !tunnelRunning,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                FilterChip(
+                                    selected = rawAesMode,
+                                    onClick = {
+                                        if (!tunnelRunning) {
+                                            scope.launch {
+                                                settingsStore.saveRawAesMode(true)
+                                                // порт AES — тот, что задеплоен на сервере
+                                                settingsStore.saveServerRawPort(serverAesPort)
+                                            }
+                                        }
+                                    },
+                                    label = { Text("AES-256 · $serverAesPort") },
+                                    enabled = !tunnelRunning,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            OutlinedTextField(
+                                value = serverRawPortInput,
+                                onValueChange = { value ->
+                                    if (value.all { it.isDigit() } && value.length <= 5) {
+                                        serverRawPortInput = value
+                                        value.toIntOrNull()?.let { port ->
+                                            scope.launch { settingsStore.saveServerRawPort(port) }
+                                        }
+                                    }
+                                },
+                                label = { Text("Порт (меняется автоматически от шифра)") },
+                                singleLine = true,
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                            )
+                        }
+                        if (connectionMode == SettingsStore.CONNECTION_MODE_SOCKS) {
+                            val socksAddr = SettingsStore.socksListenAddress(
+                                socksPortInput.toIntOrNull() ?: socksPort
+                            )
+                            OutlinedTextField(
+                                value = socksPortInput,
+                                onValueChange = { value ->
+                                    if (value.all { it.isDigit() } && value.length <= 5) {
+                                        socksPortInput = value
+                                        value.toIntOrNull()?.let { port ->
+                                            scope.launch { settingsStore.saveSocksPort(port) }
+                                        }
+                                    }
+                                },
+                                label = { Text("Порт SOCKS5") },
+                                singleLine = true,
+                                enabled = !tunnelRunning,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "Авторизация SOCKS5",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                    Text(
+                                        "Требовать логин и пароль от прокси-клиента",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(
+                                    checked = socksAuthEnabled,
+                                    onCheckedChange = { enabled ->
+                                        scope.launch {
+                                            settingsStore.saveSocksAuthEnabled(enabled)
+                                        }
+                                    },
+                                    enabled = !tunnelRunning,
+                                )
+                            }
+                            AnimatedVisibility(visible = socksAuthEnabled) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedTextField(
+                                        value = socksUsernameInput,
+                                        onValueChange = { value ->
+                                            if (value.toByteArray().size <= 255) {
+                                                socksUsernameInput = value
+                                                scope.launch {
+                                                    settingsStore.saveSocksUsername(value)
+                                                }
+                                            }
+                                        },
+                                        label = { Text("Логин SOCKS5") },
+                                        singleLine = true,
+                                        enabled = !tunnelRunning,
+                                        isError = socksUsernameInput.isBlank(),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(14.dp),
+                                    )
+                                    OutlinedTextField(
+                                        value = socksPasswordInput,
+                                        onValueChange = { value ->
+                                            if (value.toByteArray().size <= 255) {
+                                                socksPasswordInput = value
+                                                scope.launch {
+                                                    settingsStore.saveSocksPassword(value)
+                                                }
+                                            }
+                                        },
+                                        label = { Text("Пароль SOCKS5") },
+                                        singleLine = true,
+                                        enabled = !tunnelRunning,
+                                        isError = socksPasswordInput.isBlank(),
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(14.dp),
+                                    )
+                                    if (!socksAuthValid) {
+                                        Text(
+                                            "Для запуска SOCKS5 заполните логин и пароль",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                }
+                            }
+                            Surface(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("socks", socksAddr))
+                                    Toast.makeText(context, "Скопировано: $socksAddr", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                                ),
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            "Адрес прокси",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        Text(
+                                            socksAddr,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.ContentCopy,
+                                        contentDescription = "Копировать",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                            }
+                        }
+                        if (tunnelRunning) {
+                            Text(
+                                "Смена режима — после отключения туннеля",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
                     // Применимо ко всем режимам — меняет только транспорт до
@@ -1574,7 +1840,7 @@ fun SettingsTabContent(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "27 White",
+                text = "qWDTT",
                 style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.ExtraBold),
                 color = MaterialTheme.colorScheme.primary
             )
@@ -1609,61 +1875,315 @@ fun SettingsTabContent(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Button(
-                onClick = {
-                    when {
-                        tunnelRunning || tunnelReconnecting || (tunnelConnecting && connectCancelArmed) -> {
-                            context.startService(
-                                Intent(context, TunnelService::class.java).apply { action = "STOP" }
+            if (profiles.isNotEmpty()) {
+                var expanded by remember { mutableStateOf(false) }
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { expanded = true },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f),
+                            contentColor = MaterialTheme.colorScheme.primary
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = if (currentProfileName.isNotEmpty()) "Профиль: $currentProfileName" else "Быстрый выбор профиля",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false },
+                        modifier = Modifier
+                            .fillMaxWidth(0.85f)
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                                shape = RoundedCornerShape(20.dp)
+                            )
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(MaterialTheme.colorScheme.surface)
+                    ) {
+                        profiles.forEach { p ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        p.name,
+                                        fontWeight = if (p.id == currentProfileId) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (p.id == currentProfileId) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                onClick = {
+                                    expanded = false
+                                    scope.launch {
+                                        profilesStore.applyProfile(context, p.id)
+
+                                        peerInput = PeerAddress.host(settingsStore.peer.first())
+                                        portInput = settingsStore.listenPort.first().toString()
+                                        workersInput = roundToGroup(
+                                            settingsStore.workersPerHash.first().toFloat(),
+                                            dynamicMaxWorkers,
+                                            vkAccountAuth
+                                        )
+
+                                        if (tunnelRunning) {
+                                            context.startService(
+                                                Intent(context, TunnelService::class.java).apply { action = "STOP" }
+                                            )
+                                            delay(800)
+                                            requestVpnAndStart()
+                                        }
+
+                                        Toast.makeText(context, "Профиль «${p.name}» применен!", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        tint = if (p.id == currentProfileId) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             )
                         }
-                        tunnelConnecting -> {
-                            // Grace: игнор, чтобы жест «Подключить» не превратился в «Отмена»
-                        }
-                        else -> {
-                            requestVpnAndStart()
-                        }
                     }
-                },
-                enabled = (isValid && cooldownSeconds == 0 && !tunnelConnecting && !tunnelReconnecting) ||
-                    tunnelRunning ||
-                    tunnelReconnecting ||
-                    (tunnelConnecting && connectCancelArmed),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                shape = RoundedCornerShape(18.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = buttonColor,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                )
+                }
+            } else {
+                Surface(
+                    onClick = onOpenProfiles,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f),
+                    border = BorderStroke(
+                        1.dp,
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                    ),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Нет серверов",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                "Добавьте или импортируйте профиль во вкладке «Профили»",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Icon(
+                            Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+
+            // Компактный переключатель режима подключения прямо рядом с кнопкой
+            // "Подключить" — тот же connectionMode, что и подробный блок "Режим
+            // подключения" выше в списке настроек, просто на виду без прокрутки.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    imageVector = when {
-                        tunnelRunning || tunnelReconnecting || (tunnelConnecting && connectCancelArmed) -> Icons.Default.Stop
-                        else -> Icons.Default.PowerSettingsNew
+                FilterChip(
+                    selected = connectionMode == SettingsStore.CONNECTION_MODE_VPN,
+                    onClick = {
+                        if (!tunnelRunning) {
+                            scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_VPN) }
+                        }
                     },
-                    contentDescription = null,
-                    modifier = Modifier.size(22.dp)
+                    label = { Text("WG") },
+                    enabled = !tunnelRunning,
+                    modifier = Modifier.weight(1f)
                 )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = when {
-                        tunnelReconnecting -> "Переподключение…"
-                        tunnelConnecting && !tunnelRunning && !connectCancelArmed -> "Подключение…"
-                        tunnelConnecting && !tunnelRunning -> "Отмена"
-                        tunnelRunning -> "Остановить"
-                        cooldownSeconds > 0 -> "Подождите ($cooldownSeconds)"
-                        else -> "Подключить"
+                FilterChip(
+                    selected = connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN,
+                    onClick = {
+                        if (!tunnelRunning) {
+                            scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_RAWTUN) }
+                        }
                     },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
+                    label = { Text("Raw") },
+                    enabled = !tunnelRunning,
+                    modifier = Modifier.weight(1f)
                 )
+                FilterChip(
+                    selected = connectionMode == SettingsStore.CONNECTION_MODE_SOCKS,
+                    onClick = {
+                        if (!tunnelRunning) {
+                            scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_SOCKS) }
+                        }
+                    },
+                    label = { Text("SOCKS5") },
+                    enabled = !tunnelRunning,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedButton(
+                    onClick = { showSecretsDialog = true },
+                    modifier = Modifier.height(56.dp),
+                    shape = RoundedCornerShape(18.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (tunnelSecretsMissing) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surface,
+                        contentColor = if (tunnelSecretsMissing) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        if (tunnelSecretsMissing) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                    )
+                ) {
+                    Icon(imageVector = Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Секреты", fontWeight = FontWeight.SemiBold)
+                }
+
+                Button(
+                    onClick = {
+                        when {
+                            tunnelRunning || tunnelReconnecting || (tunnelConnecting && connectCancelArmed) -> {
+                                context.startService(
+                                    Intent(context, TunnelService::class.java).apply { action = "STOP" }
+                                )
+                            }
+                            tunnelConnecting -> {
+                                // Grace: игнор, чтобы жест «Подключить» не превратился в «Отмена»
+                            }
+                            else -> {
+                                requestVpnAndStart()
+                            }
+                        }
+                    },
+                    enabled = (isValid && cooldownSeconds == 0 && !tunnelConnecting && !tunnelReconnecting) ||
+                        tunnelRunning ||
+                        tunnelReconnecting ||
+                        (tunnelConnecting && connectCancelArmed),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(56.dp),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = buttonColor,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    )
+                ) {
+                    Icon(
+                        imageVector = when {
+                            tunnelRunning || tunnelReconnecting || (tunnelConnecting && connectCancelArmed) -> Icons.Default.Stop
+                            else -> Icons.Default.PowerSettingsNew
+                        },
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = when {
+                            tunnelReconnecting -> "Переподключение…"
+                            tunnelConnecting && !tunnelRunning && !connectCancelArmed -> "Подключение…"
+                            tunnelConnecting && !tunnelRunning -> "Отмена"
+                            tunnelRunning -> "Остановить"
+                            cooldownSeconds > 0 -> "Подождите ($cooldownSeconds)"
+                            else -> "Подключить"
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                    )
+                }
             }
         }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+        AppSectionCard(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedTextField(
+                value = peerInput,
+                onValueChange = {
+                    var cleaned = it.filter { c -> c != ' ' }
+                    if (PeerAddress.hasExplicitPort(cleaned)) {
+                        cleaned = PeerAddress.host(cleaned)
+                    }
+                    peerInput = cleaned
+                    scheduleSave()
+                },
+                label = { Text("IP сервера или домен") },
+                placeholder = { Text("31.76.102.29") },
+                singleLine = true,
+                isError = !isPeerValid && peerInput.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                )
+            )
+
+            OutlinedButton(
+                onClick = { showHashesDialog = true },
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    contentColor = MaterialTheme.colorScheme.onSurface
+                ),
+                border = BorderStroke(
+                    1.dp,
+                    if (hasInputHashErrors) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                )
+            ) {
+                Icon(Icons.Default.Tag, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("VK Хеши ($filledHashCount)", fontWeight = FontWeight.SemiBold)
+            }
+
+            val errorTexts = hashErrors.filter { !it.contains("короткий") }
+            if (errorTexts.isNotEmpty()) {
+                Text(
+                    text = errorTexts.joinToString(", "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
 
         // ═══ Мощность + Капча ═══
         AppSectionCard(
@@ -1683,12 +2203,39 @@ fun SettingsTabContent(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "27 (фиксировано)",
+                        text = "${currentWorkers.toInt()}",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.clearAndSetSemantics { }
                     )
                 }
+
+                Spacer(Modifier.height(4.dp))
+
+                val maxWorkers = dynamicMaxWorkers
+                val minWorkers = if (vkAccountAuth) 1f else WORKERS_PER_GROUP.toFloat()
+                val workerStep = if (vkAccountAuth) 1f else WORKERS_PER_GROUP.toFloat()
+                val currentWorkersVal = if (vkAccountAuth) {
+                    currentWorkers.coerceIn(1f, maxWorkers).roundToInt().toFloat()
+                } else {
+                    roundToGroup(currentWorkers.coerceIn(minWorkers, maxWorkers), maxWorkers)
+                }
+
+                CompactSteppedSlider(
+                    value = currentWorkersVal,
+                    onValueChange = { raw ->
+                        workersInput = if (vkAccountAuth) {
+                            raw.coerceIn(1f, maxWorkers).roundToInt().toFloat()
+                        } else {
+                            roundToGroup(raw, maxWorkers)
+                        }
+                        scheduleSave()
+                    },
+                    valueRange = minWorkers..maxWorkers,
+                    stepSize = workerStep,
+                    enabled = !tunnelRunning,
+                    modifier = Modifier.fillMaxWidth()
+                )
 
                 // — Разделитель —
                 HorizontalDivider(
@@ -2594,7 +3141,7 @@ fun SecretsDialog(
                             modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Пароль доступа", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text("Секреты", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     }
                     IconButton(onClick = onDismiss) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Закрыть")
@@ -2606,8 +3153,8 @@ fun SecretsDialog(
                 OutlinedTextField(
                     value = passwordInput,
                     onValueChange = { passwordInput = it },
-                    label = { Text("Пароль от бота @vpnclub27bot") },
-                    placeholder = { Text("Вставьте пароль доступа") },
+                    label = { Text("Заданный пароль туннеля") },
+                    placeholder = { Text("Придумайте надежный пароль") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),

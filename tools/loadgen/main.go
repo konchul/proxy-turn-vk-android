@@ -142,7 +142,7 @@ func main() {
 	case "echo":
 		runEcho(*echo, *echoGso)
 		return
-	case "load", "flood":
+	case "load":
 	default:
 		log.Fatalf("неизвестный mode %q", *mode)
 	}
@@ -251,7 +251,6 @@ func main() {
 
 	deadline := time.Now().Add(time.Duration(*duration) * time.Second)
 	sent, recv := uint64(0), uint64(0)
-	oneWay := *mode == "flood"
 	var rttSum time.Duration
 	rttN := uint64(0)
 	rttMax := time.Duration(0)
@@ -273,9 +272,6 @@ func main() {
 			}
 			// Ответ — сырой IP-пакет от эха; берём ip.id для RTT и считаем приём
 			// только для наших маркерных пакетов (payload[0:4] == 0xC0DEBEEF).
-			if oneWay {
-				continue
-			}
 			if m-28 >= 8 && binary.BigEndian.Uint32(plain[28:32]) == 0xC0DEBEEF {
 				recv++
 				id := binary.BigEndian.Uint32(plain[32:36])
@@ -329,17 +325,13 @@ func main() {
 	rttAvgF = float64(rttAvg.Microseconds()) / 1000
 	rttMaxF = float64(rttMax.Microseconds()) / 1000
 	pendingMu.Unlock()
-	if oneWay {
-		recv = sent // односторонний замер: считаем только то, что сервер принял
-	}
 	lossPct := 0.0
-	bw := float64(recv) / float64(*duration) * float64(*size) * 8 / 1e6
 	if sent > 0 {
 		lossPct = 100 * float64(sent-recv) / float64(sent)
 	}
-	fmt.Printf("RESULT pps_target=%d sent=%d recv=%d achieved_pps=%.0f loss=%.2f%% rtt_avg=%.3fms rtt_max=%.3fms rtt_n=%d bw=%.0f Mbit/s\n",
+	fmt.Printf("RESULT pps_target=%d sent=%d recv=%d achieved_pps=%.0f loss=%.2f%% rtt_avg=%.3fms rtt_max=%.3fms rtt_n=%d\n",
 		*pps, sent, recv, float64(recv)/float64(*duration), lossPct,
-		rttAvgF, rttMaxF, rttNFinal, bw)
+		rttAvgF, rttMaxF, rttNFinal)
 }
 
 func splitN(s string, sep byte) []string {

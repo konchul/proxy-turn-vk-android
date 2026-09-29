@@ -36,7 +36,7 @@ object NotificationHelper {
         }
         val channel = NotificationChannel(
             TUNNEL_CHANNEL_ID,
-            "27 White Туннель",
+            "qWDTT Туннель",
             NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
             description = "Статус VPN-туннеля и переподключение"

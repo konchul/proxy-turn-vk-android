@@ -27,7 +27,6 @@ func main() {
 	listenDirect := flag.String("listen-direct", "", "адрес для клиентов без DTLS (RTP-obfs AEAD напрямую); пусто = выключено")
 	listenRaw := flag.String("listen-raw", "", "адрес для raw-IP клиентов без WireGuard (свой TUN/NAT); пусто = выключено")
 	listenRawAES := flag.String("listen-raw-aes", "", "raw-листенер с новым протоколом (AES-256-GCM obfs, AES-NI); старые клиенты его не понимают; пусто = выключено")
-	rawMTUFlag := flag.Int("raw-mtu", 1400, "MTU raw-режима (1400: audio 1453 / video 1489 на проводе, влезает в Ethernet 1500)")
 	tunGSO := flag.Bool("tun-gso", false, "raw-TUN с IFF_VNET_HDR: GSO-суперкадры на даунлинке, GRO на аплинке (фолбэк на обычный режим, если offload недоступен)")
 	adminListen := flag.String("admin-listen", "", "HTTPS адрес admin API; пусто = выключено")
 	adminTokenFile := flag.String("admin-token-file", "", "файл токена admin API")
@@ -236,9 +235,6 @@ func main() {
 	// опционально: если флаг не передан, ничего не создаётся и не трогает
 	// существующие WG-пути (56000/-listen-direct).
 	if *listenRaw != "" || *listenRawAES != "" {
-		if *rawMTUFlag >= 576 && *rawMTUFlag <= 1500 {
-			rawMTU = *rawMTUFlag
-		}
 		router, err := newRawRouter(*tunGSO)
 		if err != nil {
 			log.Fatalf("[RAW] %v", err)

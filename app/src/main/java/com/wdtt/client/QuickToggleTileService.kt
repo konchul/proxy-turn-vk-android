@@ -50,7 +50,7 @@ class QuickToggleTileService : TileService() {
                         } else {
                             Toast.makeText(
                                 this@QuickToggleTileService,
-                                "Разрешите 27 White создать VPN-подключение",
+                                "Разрешите qWDTT создать VPN-подключение",
                                 Toast.LENGTH_LONG,
                             ).show()
                             openVpnPermissionActivity()
@@ -76,7 +76,7 @@ class QuickToggleTileService : TileService() {
     private fun updateTileConnecting() {
         val tile = qsTile ?: return
         tile.state = Tile.STATE_UNAVAILABLE
-        tile.label = "27 White"
+        tile.label = "qWDTT"
         if (Build.VERSION.SDK_INT >= 29) {
             tile.subtitle = "Подключение…"
         }
@@ -87,13 +87,13 @@ class QuickToggleTileService : TileService() {
         val tile = qsTile ?: return
         if (running) {
             tile.state = Tile.STATE_ACTIVE
-            tile.label = "27 White: Вкл"
+            tile.label = "qWDTT: Вкл"
             if (Build.VERSION.SDK_INT >= 29) {
                 tile.subtitle = "Активен"
             }
         } else {
             tile.state = Tile.STATE_INACTIVE
-            tile.label = "27 White: Выкл"
+            tile.label = "qWDTT: Выкл"
             if (Build.VERSION.SDK_INT >= 29) {
                 tile.subtitle = "Отключен"
             }

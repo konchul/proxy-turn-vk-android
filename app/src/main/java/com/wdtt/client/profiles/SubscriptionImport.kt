@@ -56,7 +56,7 @@ object SubscriptionImport {
         if (trimmed.isEmpty()) return null
 
         var jsonStr = trimmed
-        if (!trimmed.startsWith("[") && !trimmed.startsWith("{") && !trimmed.startsWith("qwdtt:") && !trimmed.startsWith("27white:")) {
+        if (!trimmed.startsWith("[") && !trimmed.startsWith("{") && !trimmed.startsWith("qwdtt:")) {
             try {
                 val decoded = android.util.Base64.decode(trimmed, android.util.Base64.DEFAULT)
                 jsonStr = String(decoded, Charsets.UTF_8).trim()
@@ -64,8 +64,7 @@ object SubscriptionImport {
             }
         }
 
-        if (jsonStr.startsWith("qwdtt://config") || jsonStr.startsWith("qwdtt:config") ||
-            jsonStr.startsWith("27white://config") || jsonStr.startsWith("27white:config")) {
+        if (jsonStr.startsWith("qwdtt://config") || jsonStr.startsWith("qwdtt:config")) {
             val single = parseQwdttUri(jsonStr) ?: return null
             return ParsedRemoteSubscription(profiles = listOf(single), subscriptionName = single.name)
         }
@@ -167,14 +166,11 @@ object SubscriptionImport {
 
     private fun parseQwdttUri(trimmed: String): ConnectionProfile? {
         return try {
-            val normalized = trimmed.replace("qwdtt:config", "qwdtt://config")
-                .replace("27white:config", "27white://config")
-                .replace("27white://config", "qwdtt://config")
-            val uri = android.net.Uri.parse(normalized)
-            val name = uri.getQueryParameter("name") ?: "27 White"
+            val uri = android.net.Uri.parse(trimmed.replace("qwdtt:config", "qwdtt://config"))
+            val name = uri.getQueryParameter("name") ?: "QR Профиль"
             val peer = uri.getQueryParameter("peer") ?: return null
             val hashes = uri.getQueryParameter("hashes") ?: ""
-            val workers = 27
+            val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: 9
             val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 9000
             val pass = uri.getQueryParameter("pass") ?: uri.getQueryParameter("password") ?: ""
             ConnectionProfile(
