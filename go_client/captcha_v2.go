@@ -40,11 +40,11 @@ var (
 	reCaptchaV2DebugInfo  = regexp.MustCompile(`debug_info:(?:[^"]*\|\|)?"([a-fA-F0-9]{64})"`)
 	reCaptchaV2Version    = regexp.MustCompile(`vkid/([0-9.]*)/not_robot_captcha\.js`)
 
-	errCaptchaV2RateLimit      = errors.New("captcha session rate limit reached")
-	errCaptchaV2Bot            = errors.New("captcha bot challenge")
-	errCaptchaSessionExpired     = errors.New("captcha session expired, need fresh challenge")
+	errCaptchaV2RateLimit    = errors.New("captcha session rate limit reached")
+	errCaptchaV2Bot          = errors.New("captcha bot challenge")
+	errCaptchaSessionExpired = errors.New("captcha session expired, need fresh challenge")
 
-	captchaV2MaxAttempts = 2
+	captchaV2MaxAttempts     = 2
 	captchaV2MaxSliderChecks = 2
 
 	captchaV2DebugCache  sync.Map // scriptURL -> string

@@ -22,15 +22,21 @@ import (
 )
 
 const (
-	workerSendBuf      = 128
-	sessionReadTimeout = 30 * time.Minute // Increased from 60s to 30min
-	readBufSize        = 1600
-	socketBufSize      = 625 * 1024
-	keepaliveByte      = 0xFF // keepalive marker (DTLS-level или прямой obfs-кадр)
-	// keepaliveInterval: 1с (как у референсного клиента) — агрессивнее держит
-	// TURN permission/NAT-маппинг "тёплым" на каждом из 18-108 relay-сокетов
-	// сессии, чем прежние 15с/5с.
-	keepaliveInterval = 10 * time.Second
+	workerSendBuf = 128
+	// 90с без даунлинка = кандидат на мёртвую сессию (сервер шлёт понг на наш
+	// keepalive каждые 25с, так что живая сессия молчать не может). Три
+	// таймаута подряд -> сессия пересоздаётся (новый TURN-allocation, новый
+	// 4-tuple — обходит молчаливый дроп провайдера после простоя).
+	sessionReadTimeout    = 90 * time.Second
+	sessionReadTimeoutMax = 3
+	readBufSize           = 1600
+	socketBufSize         = 625 * 1024
+	keepaliveByte         = 0xFF // keepalive marker (DTLS-level или прямой obfs-кадр)
+	// keepaliveInterval: 25с. TURN permission живёт 300с (RFC 5766), NAT-
+	// маппинги на мобильных сетях — от 30с; серверный idleTimeout — 90с
+	// (3 хартбита в окно). Прежние 10с давали ~1.8 пробуждения радио/с на
+	// группе из 9 воркеров (obfs KA + TURN binding) — разряд батареи.
+	keepaliveInterval = 25 * time.Second
 	// keepaliveMinSize/keepaliveMaxSize: keepalive-пакет теперь не
 	// фиксированного размера (было 1 байт постоянно) — случайная длина
 	// 25-44 байта имитирует "тишину" OPUS в реальном звонке; постоянный
@@ -79,12 +85,17 @@ func (c *obfsDirectConn) Read(b []byte) (int, error) {
 }
 
 func (c *obfsDirectConn) Write(b []byte) (int, error) {
-	wrapped, err := obfsWrapPacket(c.wrapKey, b, c.cfg, c.writeState)
+	// wrapped <= len(b)+12+16+padding(<=60); 88 байт запаса, буфер из пула
+	wbuf := getPktBuf(len(b) + 88)
+	wrapped, err := obfsWrapPacketBuf(c.wrapKey, b, c.cfg, c.writeState, wbuf)
 	if err != nil {
+		putPktBuf(wbuf)
 		return 0, err
 	}
-	if _, err := c.relay.WriteTo(wrapped, c.peer); err != nil {
-		return 0, err
+	_, writeErr := c.relay.WriteTo(wrapped, c.peer)
+	putPktBuf(wbuf)
+	if writeErr != nil {
+		return 0, writeErr
 	}
 	return len(b), nil
 }
@@ -277,7 +288,9 @@ func RunSession(
 	sessionWg.Add(1)
 	go func() {
 		defer sessionWg.Done()
-		t := time.NewTicker(10 * time.Second)
+		// TURN binding каждые 25с: permission 300с, NAT-маппинг от 30с —
+		// прежние 10с будили радио втрое чаще без выгоды.
+		t := time.NewTicker(25 * time.Second)
 		defer t.Stop()
 		for {
 			select {
@@ -382,6 +395,15 @@ func RunSession(
 			defer relayWg.Done()
 			defer sessCancel()
 			b := make([]byte, readBufSize)
+			// wbuf — pooled-буфер под obfs-фрейм; релиз строго в той же
+			// итерации после WriteTo (defer в бесконечном цикле копился бы
+			// до выхода горутины)
+			var wbuf []byte
+			defer func() {
+				if wbuf != nil {
+					putPktBuf(wbuf)
+				}
+			}()
 			for {
 				n, _, readErr := pipeA.ReadFrom(b)
 				if readErr != nil {
@@ -390,8 +412,11 @@ func RunSession(
 				out := b[:n]
 				if useWrap {
 					if dtlsObfsCfg != nil && obfsWriteState != nil {
-						wrapped, wrapErr := obfsWrapPacket(tp.WrapKey, out, dtlsObfsCfg, obfsWriteState)
+						wbuf = getPktBuf(len(out) + 88)
+						wrapped, wrapErr := obfsWrapPacketBuf(tp.WrapKey, out, dtlsObfsCfg, obfsWriteState, wbuf)
 						if wrapErr != nil {
+							putPktBuf(wbuf)
+							wbuf = nil
 							log.Printf("[СЕССИЯ #%d] OBFS wrap: %v", sessionID, wrapErr)
 							return
 						}
@@ -403,6 +428,10 @@ func RunSession(
 				}
 				if _, writeErr := relay.WriteTo(out, peer); writeErr != nil {
 					return
+				}
+				if wbuf != nil {
+					putPktBuf(wbuf)
+					wbuf = nil
 				}
 			}
 		}()
@@ -649,6 +678,7 @@ func RunSession(
 		defer proxyWg.Done()
 		defer sessCancel()
 		b := make([]byte, 2000)
+		idleReadTimeouts := 0
 		for {
 			_ = activeConn.SetReadDeadline(time.Now().Add(sessionReadTimeout))
 			n, readErr := activeConn.Read(b)
@@ -657,6 +687,16 @@ func RunSession(
 					return
 				}
 				if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+					// таймауты подряд считаем; после N — мёртвая сессия
+					idleReadTimeouts++
+					if idleReadTimeouts >= sessionReadTimeoutMax {
+						log.Printf("[ВОРКЕР #%d] Нет даунлинка %v ×%d — пересоздание сессии", sessionID, sessionReadTimeout, idleReadTimeouts)
+						select {
+						case sessionErrCh <- fmt.Errorf("transport reader: idle timeout x%d", idleReadTimeouts):
+						default:
+						}
+						return
+					}
 					continue
 				}
 				log.Printf("[ВОРКЕР #%d] Ошибка Reader: %v", sessionID, readErr)
@@ -672,6 +712,7 @@ func RunSession(
 				continue
 			}
 
+			idleReadTimeouts = 0
 			if atomic.CompareAndSwapUint32(&firstWireRead, 0, 1) {
 				log.Printf("[ВОРКЕР #%d] [ДЕБАГ] Получен ПЕРВЫЙ пакет из соединения (%d байт)", sessionID, n)
 			}

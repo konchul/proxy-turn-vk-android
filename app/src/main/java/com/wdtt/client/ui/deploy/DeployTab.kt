@@ -124,6 +124,7 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
     val flowServerWgPort by settingsStore.serverWgPort.collectAsStateWithLifecycle(initialValue = 56001)
     val savedServerDirectPort by settingsStore.serverDirectPort.collectAsStateWithLifecycle(initialValue = 56002)
     val savedServerRawPort by settingsStore.serverRawPort.collectAsStateWithLifecycle(initialValue = 56003)
+    val savedServerAesPort by settingsStore.serverAesPort.collectAsStateWithLifecycle(initialValue = 46000)
 
     // Локальный (не Flow) state для полей "секретов" формы — как ip/login/
     // password выше. Раньше currentFormAsServer/автосохранение читали эти
@@ -493,6 +494,7 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
                     // effectiveWgPort выше — они не завязаны на connectionMode).
                     val effectiveDirectPort = savedServerDirectPort.coerceIn(1, 65535)
                     val effectiveRawPort = savedServerRawPort.coerceIn(1, 65535)
+                    val effectiveAesPort = savedServerAesPort.coerceIn(1, 65535)
                     val appContext = context.applicationContext
                     val sshAuth = buildSshAuth(
                         useKey = sshUseKey,
@@ -522,11 +524,14 @@ fun DeployScreen(initialServerId: String?, onBack: () -> Unit) {
                                 wgPort = effectiveWgPort,
                                 directPort = effectiveDirectPort,
                                 rawPort = effectiveRawPort,
+                                aesPort = effectiveAesPort,
                                 dns1 = dns1,
                                 dns2 = dns2,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
                             )
                             if (result.success) {
+                                settingsStore.saveServerAesPort(effectiveAesPort)
+                                settingsStore.saveServerRawPort(effectiveRawPort)
                                 adminApiToken = result.adminApiToken
                                 adminCertPin = result.adminCertPin
                                 val savedId = selectedServerId
@@ -1322,7 +1327,7 @@ private suspend fun performDeploy(
     sshAuth: SshAuth,
     mainPass: String, adminId: String, botToken: String,
     adminApiToken: String,
-    dtlsPort: Int, wgPort: Int, directPort: Int?, rawPort: Int?, dns1: String, dns2: String,
+    dtlsPort: Int, wgPort: Int, directPort: Int?, rawPort: Int?, aesPort: Int?, dns1: String, dns2: String,
     onProgress: (Float, String) -> Unit
 ): DeployResult = withContext(Dispatchers.IO) {
     var session: Session? = null
@@ -1374,8 +1379,9 @@ private suspend fun performDeploy(
         onProgress(0.08f, "Установка...")
         val directPortEnv = if (directPort != null) "WDTT_DIRECT_PORT=$directPort " else ""
         val rawPortEnv = if (rawPort != null) "WDTT_RAW_PORT=$rawPort " else ""
+        val aesPortEnv = if (aesPort != null) "WDTT_AES_PORT=$aesPort " else ""
         val output = ssh.exec(
-            rootCommand("chmod 600 /tmp/wdtt-admin.token /tmp/wdtt-main.password /tmp/wdtt-bot.token && env WDTT_ADMIN_ID=${shellQuote(adminId)} WDTT_DNS_SERVERS=${shellQuote(dnsServers)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port ${directPortEnv}${rawPortEnv}bash /tmp/deploy.sh"),
+            rootCommand("chmod 600 /tmp/wdtt-admin.token /tmp/wdtt-main.password /tmp/wdtt-bot.token && env WDTT_ADMIN_ID=${shellQuote(adminId)} WDTT_DNS_SERVERS=${shellQuote(dnsServers)} WDTT_DTLS_PORT=$dtlsPort WDTT_WG_PORT=$wgPort WDTT_SSH_PORT=$port ${directPortEnv}${rawPortEnv}${aesPortEnv}bash /tmp/deploy.sh"),
             timeout = CMD_TIMEOUT
         )
         val certPin = Regex("WDTT_ADMIN_PIN\\|(sha256/[A-Za-z0-9+/=]+)")
@@ -1445,6 +1451,7 @@ internal suspend fun performMultiDeploy(
     val settingsStore = SettingsStore(context.applicationContext)
     val effectiveDirectPort = settingsStore.serverDirectPort.first().coerceIn(1, 65535)
     val effectiveRawPort = settingsStore.serverRawPort.first().coerceIn(1, 65535)
+    val effectiveAesPort = settingsStore.serverAesPort.first().coerceIn(1, 65535)
 
     for (server in servers) {
         onServerStarted(server.id)
@@ -1474,11 +1481,14 @@ internal suspend fun performMultiDeploy(
                 wgPort = effectiveWgPort,
                 directPort = effectiveDirectPort,
                 rawPort = effectiveRawPort,
+                aesPort = effectiveAesPort,
                 dns1 = server.dns1,
                 dns2 = server.dns2,
                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
             )
             if (result.success) {
+                settingsStore.saveServerAesPort(effectiveAesPort)
+                settingsStore.saveServerRawPort(effectiveRawPort)
                 ServersStore(context).updateServer(
                     server.copy(
                         adminApiToken = result.adminApiToken,

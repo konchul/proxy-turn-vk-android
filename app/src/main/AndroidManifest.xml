@@ -16,7 +16,7 @@
         android:name=".WdttApplication"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="qWDTT"
+        android:label="27 White"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
@@ -40,6 +40,19 @@
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
+            <!-- Открытие qwdtt:// и 27white:// ссылок конфигурации -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="qwdtt" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="27white" />
+            </intent-filter>
             <!-- Открытие .qwdtt файлов -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -50,6 +63,11 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="file" android:host="*" android:pathPattern=".*\\.qwdtt" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.27white" />
             </intent-filter>
             <!-- Открытие .conf файлов -->
             <intent-filter>
@@ -124,7 +142,7 @@
 
         <receiver
             android:name=".TunnelWidgetProvider"
-            android:label="qWDTT Туннель"
+            android:label="27 White Туннель"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -137,7 +155,7 @@
 
         <service
             android:name=".QuickToggleTileService"
-            android:label="qWDTT"
+            android:label="27 White"
             android:icon="@drawable/ic_tile_custom"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">
