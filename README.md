@@ -18,6 +18,16 @@ VPN-клиент и сервер, маскирующие трафик под RTP
 
 Подробности и бенчмарки: [docs/OPTIMIZATIONS.md](docs/OPTIMIZATIONS.md)
 
+## Установка сервера (одной командой)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/konchul/proxy-turn-vk-android/master/install.sh | bash
+```
+
+Скачивает бинарник из latest release, создаёт конфиг и пароль, ставит systemd-юнит
+(порты: 56000 DTLS/WG · 56002 direct · 56003 raw · 46000 raw AES, MTU 1350),
+открывает файрвол, включает автозапуск и печатает пароль подключения.
+
 ## Сборка
 
 ```bash
