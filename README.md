@@ -16,7 +16,7 @@ VPN-клиент и сервер, маскирующие трафик под RTP
 - Деплой с выбором портов из приложения; ядро embedded-сервера стрипнуто
 - APK 18 МБ (реальный R8-релиз)
 
-Подробности и бенчмарки: [docs/OPTIMIZATIONS.md](docs/OPTIMIZATIONS.md)
+Бенчмарки: [docs/BENCHMARK.md](docs/BENCHMARK.md) · Детали оптимизаций: [docs/OPTIMIZATIONS.md](docs/OPTIMIZATIONS.md)
 
 ## Установка сервера (одной командой)
 
