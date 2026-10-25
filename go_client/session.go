@@ -61,10 +61,17 @@ type obfsDirectConn struct {
 	cfg        *ObfsConfig
 	writeState *ObfsState
 	replay     replayWindow
+	wireBuf    []byte // переиспользуемый буфер чтения (ноль аллокаций в горячем цикле Read)
 }
 
 func (c *obfsDirectConn) Read(b []byte) (int, error) {
-	wire := make([]byte, len(b)+80) // RTP-заголовок(12) + AEAD tag + padding
+	// RTP-заголовок (12) + AEAD tag (16) + padding (до 60 байт); буфер живёт
+	// в структуре соединения и переиспользуется между вызовами без heap-аллокаций.
+	need := len(b) + 88
+	if cap(c.wireBuf) < need {
+		c.wireBuf = make([]byte, need)
+	}
+	wire := c.wireBuf[:need]
 	for {
 		n, _, err := c.relay.ReadFrom(wire)
 		if err != nil {
