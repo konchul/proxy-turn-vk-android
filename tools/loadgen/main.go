@@ -142,7 +142,13 @@ func main() {
 	case "echo":
 		runEcho(*echo, *echoGso)
 		return
-	case "load":
+	case "load", "flood":
+	case "csqtt":
+		if *password == "" {
+			log.Fatal("csqtt: нужен -password")
+		}
+		runCsqtt(*server, *password, *device, *pps, *size, *duration)
+		return
 	default:
 		log.Fatalf("неизвестный mode %q", *mode)
 	}
@@ -325,13 +331,18 @@ func main() {
 	rttAvgF = float64(rttAvg.Microseconds()) / 1000
 	rttMaxF = float64(rttMax.Microseconds()) / 1000
 	pendingMu.Unlock()
+	counted := recv
+	if *mode == "flood" {
+		counted = sent
+	}
 	lossPct := 0.0
 	if sent > 0 {
-		lossPct = 100 * float64(sent-recv) / float64(sent)
+		lossPct = 100 * float64(sent-counted) / float64(sent)
 	}
-	fmt.Printf("RESULT pps_target=%d sent=%d recv=%d achieved_pps=%.0f loss=%.2f%% rtt_avg=%.3fms rtt_max=%.3fms rtt_n=%d\n",
-		*pps, sent, recv, float64(recv)/float64(*duration), lossPct,
-		rttAvgF, rttMaxF, rttNFinal)
+	bw := float64(counted) / float64(*duration) * float64(*size) * 8 / 1e6
+	fmt.Printf("RESULT pps_target=%d sent=%d recv=%d achieved_pps=%.0f loss=%.2f%% rtt_avg=%.3fms rtt_max=%.3fms rtt_n=%d bw=%.0f Mbit/s\n",
+		*pps, sent, recv, float64(counted)/float64(*duration), lossPct,
+		rttAvgF, rttMaxF, rttNFinal, bw)
 }
 
 func splitN(s string, sep byte) []string {
