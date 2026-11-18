@@ -237,7 +237,7 @@ func statsLoop(ctx context.Context, configDir string) {
 			downGB := float64(toC) / (1024 * 1024 * 1024)
 			upGB := float64(fromC) / (1024 * 1024 * 1024)
 
-			statsJSON, _ := json.Marshal(map[string]interface{}{
+			stats := map[string]interface{}{
 				"active":    active,
 				"total":     total,
 				"nat":       natType,
@@ -247,7 +247,12 @@ func statsLoop(ctx context.Context, configDir string) {
 				"passwords": numPasswords,
 				"devices":   numDevices,
 				"timestamp": time.Now().Unix(),
-			})
+			}
+			if router := globalRawRouter.Load(); router != nil {
+				stats["raw_downlink_queue_drops"] = router.downlinkQueueDrops.Load()
+				stats["raw_downlink_write_errors"] = router.downlinkWriteErrors.Load()
+			}
+			statsJSON, _ := json.Marshal(stats)
 			os.WriteFile(statsFile, statsJSON, 0644)
 		}
 	}

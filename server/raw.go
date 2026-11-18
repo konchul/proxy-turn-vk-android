@@ -67,10 +67,11 @@ const downlinkWorkerBuf = 256
 // а фактическую запись в каждый conn делает своя горутина — так запись в N
 // relay идёт параллельно, и медленный конкретный relay не блокирует остальные.
 type downlinkWorker struct {
-	conn     net.Conn
-	deviceID string
-	sendCh   chan []byte
-	done     chan struct{}
+	conn        net.Conn
+	deviceID    string
+	sendCh      chan []byte
+	done        chan struct{}
+	writeErrors *atomic.Uint64
 	// Счётчики трафика сессии. Горячий путь инкрементирует атомики (uplink —
 	// handleConnRaw, downlink — run ниже), flushRawDeviceTraffic раз в 10с
 	// забирает дельты — никакой map+mutex на каждый пакет.
@@ -78,12 +79,13 @@ type downlinkWorker struct {
 	downBytes atomic.Int64
 }
 
-func newDownlinkWorker(conn net.Conn, deviceID string) *downlinkWorker {
+func newDownlinkWorker(conn net.Conn, deviceID string, writeErrors *atomic.Uint64) *downlinkWorker {
 	w := &downlinkWorker{
-		conn:     conn,
-		deviceID: deviceID,
-		sendCh:   make(chan []byte, downlinkWorkerBuf),
-		done:     make(chan struct{}),
+		conn:        conn,
+		deviceID:    deviceID,
+		sendCh:      make(chan []byte, downlinkWorkerBuf),
+		done:        make(chan struct{}),
+		writeErrors: writeErrors,
 	}
 	go w.run()
 	return w
@@ -95,6 +97,8 @@ func (w *downlinkWorker) run() {
 		if _, err := w.conn.Write(pkt); err == nil {
 			atomic.AddInt64(&totalBytesToClient, int64(len(pkt)))
 			w.downBytes.Add(int64(len(pkt)))
+		} else {
+			w.writeErrors.Add(1)
 		}
 		putBuf2048(pkt)
 	}
@@ -127,14 +131,16 @@ type rawClientSessions struct {
 }
 
 type rawRouter struct {
-	file            *os.File
-	gso             bool // TUN открыт с VNET_HDR: чтения с virtio-заголовком, записи с префиксом
-	mu              sync.RWMutex
-	sessions        map[uint32]*rawClientSessions // keyed by assigned raw IP клиента (IPv4 как uint32 — ноль аллокаций на lookup)
-	uplinkErrLogged uint32                        // чтобы не заспамить лог при устойчивой ошибке записи
-	firstUplink     uint32
-	firstDownlink   uint32
-	noSessionLogged uint32
+	file                *os.File
+	gso                 bool // TUN открыт с VNET_HDR: чтения с virtio-заголовком, записи с префиксом
+	mu                  sync.RWMutex
+	sessions            map[uint32]*rawClientSessions // keyed by assigned raw IP клиента (IPv4 как uint32 — ноль аллокаций на lookup)
+	uplinkErrLogged     uint32                        // чтобы не заспамить лог при устойчивой ошибке записи
+	firstUplink         uint32
+	firstDownlink       uint32
+	noSessionLogged     uint32
+	downlinkQueueDrops  atomic.Uint64
+	downlinkWriteErrors atomic.Uint64
 }
 
 // globalRawRouter — ссылка для flushRawDeviceTraffic (статистика), который
@@ -276,7 +282,7 @@ func (r *rawRouter) downlinkLoop() {
 		})
 		if segErr != nil {
 			if atomic.CompareAndSwapUint32(&noGsoLogged, 0, 1) {
-				log.Printf("[RAW] GSO-кадр не сегментирован (%v) — дроп", err)
+				log.Printf("[RAW] GSO-кадр не сегментирован (%v) — дроп", segErr)
 			}
 		}
 	}
@@ -289,45 +295,45 @@ func (r *rawRouter) dispatchDownlink(pkt []byte) {
 		return // короткий пакет или не IPv4 — raw-режим IPv6 не поддерживает, как и WG-путь
 	}
 	dst := binary.BigEndian.Uint32(pkt[16:20])
-	w := r.pickDownlinkConn(dst, len(pkt))
+	r.mu.RLock()
+	w := r.pickDownlinkConnLocked(dst, len(pkt))
 	if w == nil {
+		r.mu.RUnlock()
 		if atomic.CompareAndSwapUint32(&r.noSessionLogged, 0, 1) {
 			log.Printf("[RAW] downlink: нет сессии для %s (пакет от интернета, но клиент не зарегистрирован)", net.IP(pkt[16:20]).String())
 		}
 		return
 	}
-	if atomic.CompareAndSwapUint32(&r.firstDownlink, 0, 1) {
-		log.Printf("[RAW] Первый downlink-пакет доставлен клиенту %s (%d байт)", net.IP(pkt[16:20]).String(), len(pkt))
-	}
-	// Копируем в pooled-буфер: pkt живёт в общем buf, который readLoop
-	// тут же перезапишет следующим Read — writer-горутина воркера должна
-	// получить свою независимую копию, раз запись теперь асинхронная.
+	// Буфер TUN переиспользуется. Writer получает собственную копию.
 	out := getBuf2048()[:len(pkt)]
 	copy(out, pkt)
-	w.enqueue(out)
+	queued := w.enqueue(out)
+	// unregister не может закрыть sendCh между выбором воркера и enqueue.
+	r.mu.RUnlock()
+
+	if !queued {
+		r.downlinkQueueDrops.Add(1)
+		return
+	}
+	if atomic.CompareAndSwapUint32(&r.firstDownlink, 0, 1) {
+		log.Printf("[RAW] Первый downlink-пакет поставлен в очередь клиента %s (%d байт)", net.IP(pkt[16:20]).String(), len(pkt))
+	}
 }
 
-// pickDownlinkConn выбирает воркера для очередного downlink-пакета клиента
+// pickDownlinkConnLocked выбирает воркера для очередного downlink-пакета клиента
 // dst, размазывая нагрузку по всем его зарегистрированным воркерам
 // адаптивными чанками (см. downlinkChunkSizeFor) с предохранителем
 // downlinkMaxDwellMS на случай, если текущий relay начал тормозить.
 //
 // dst — IPv4-адрес как uint32 прямо из байтов пакета: hot path без
-// net.IP.String()/аллокаций. Карта читается под RLock, а ротация
-// rrIndex/rrCount/chunkStartTs крутится только здесь — downlinkLoop
-// единственный её писатель (unregister после выноса ресета эти поля не
-// трогает), поэтому мутации безопасны без write-lock.
-func (r *rawRouter) pickDownlinkConn(dst uint32, pktSize int) *downlinkWorker {
-	r.mu.RLock()
+// net.IP.String()/аллокаций. Вызывающий держит RLock до постановки пакета
+// в очередь. Поля ротации меняет только downlinkLoop.
+func (r *rawRouter) pickDownlinkConnLocked(dst uint32, pktSize int) *downlinkWorker {
 	cs := r.sessions[dst]
-	var workers []*downlinkWorker
-	if cs != nil {
-		workers = cs.workers
-	}
-	r.mu.RUnlock()
-	if len(workers) == 0 {
+	if cs == nil || len(cs.workers) == 0 {
 		return nil
 	}
+	workers := cs.workers
 	if cs.rrIndex >= len(workers) {
 		cs.rrIndex = 0
 	}
@@ -352,7 +358,7 @@ func (r *rawRouter) pickDownlinkConn(dst uint32, pktSize int) *downlinkWorker {
 }
 
 func (r *rawRouter) register(ip uint32, conn net.Conn, deviceID string) *downlinkWorker {
-	w := newDownlinkWorker(conn, deviceID)
+	w := newDownlinkWorker(conn, deviceID, &r.downlinkWriteErrors)
 	r.mu.Lock()
 	cs := r.sessions[ip]
 	if cs == nil {
@@ -378,6 +384,10 @@ func (r *rawRouter) unregister(ip uint32, w *downlinkWorker) {
 		}
 	}
 	r.mu.Unlock()
+
+	// После удаления из таблицы новых пакетов не будет. Дожидаемся
+	// опустошения очереди без блокировки маршрутизатора.
+	w.stop()
 	// Остатки счётчиков умирающей сессии — в общую копилку, иначе трафик
 	// между последним flush'ем и закрытием потеряется (см. flushRawDeviceTraffic).
 	if up := w.upBytes.Swap(0); up > 0 {
@@ -386,12 +396,6 @@ func (r *rawRouter) unregister(ip uint32, w *downlinkWorker) {
 	if down := w.downBytes.Swap(0); down > 0 {
 		addRawClosedBytes(w.deviceID, 0, down)
 	}
-	// rrIndex/rrCount здесь не трогаем: их пишет только downlinkLoop, а
-	// bounds-check в pickDownlinkConn страхует от выхода за границу.
-	// stop() вне r.mu — ждёт завершения writer-горутины (после close(sendCh)
-	// она дожигает уже поставленные в очередь пакеты), не держим лок роутера
-	// на время этого ожидания.
-	w.stop()
 }
 
 // writeUplink записывает пакет в TUN. В gso-режиме pkt УЖЕ лежит со
