@@ -75,7 +75,7 @@ func buildTCPGSOFrame(payloadLen int, gsoSize int) ([]byte, gsoInfo) {
 		gsoType:    gsoTypeTCPv4,
 		gsoSize:    uint16(gsoSize),
 		csumStart:  20,
-		csumOffset: 20 + 16,
+		csumOffset: 16,
 	}
 	return frame, info
 }
@@ -129,6 +129,45 @@ func TestSegmentTCPv4(t *testing.T) {
 	}
 }
 
+func TestSegmentTCPv4Options(t *testing.T) {
+	const gsoSize = 1000
+	const headerLen = 52
+	frame, info := buildTCPGSOFrame(3*gsoSize, gsoSize)
+	options := []byte{1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2}
+	frame = append(append(bytes.Clone(frame[:40]), options...), frame[40:]...)
+	frame[32] = 8 << 4
+	binary.BigEndian.PutUint16(frame[2:4], uint16(len(frame)))
+
+	count := 0
+	err := segmentGSO(frame, info, 1300, func(seg []byte) {
+		if len(seg) != headerLen+gsoSize {
+			t.Fatalf("segment %d: length = %d", count, len(seg))
+		}
+		if got, want := binary.BigEndian.Uint32(seg[24:28]), uint32(1000+count*gsoSize); got != want {
+			t.Errorf("segment %d: TCP seq = %d, want %d", count, got, want)
+		}
+		if seg[32]>>4 != 8 || !bytes.Equal(seg[40:headerLen], options) {
+			t.Errorf("segment %d: TCP options changed", count)
+		}
+		if !l4ChecksumValid(seg, 20) {
+			t.Errorf("segment %d: invalid TCP checksum", count)
+		}
+		count++
+	})
+	if err != nil {
+		t.Fatalf("segmentGSO: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("got %d segments, want 3", count)
+	}
+
+	if err := segmentGSO(frame[:headerLen-1], info, 1300, func([]byte) {
+		t.Fatal("emitted a segment from a truncated TCP header")
+	}); err == nil {
+		t.Fatal("expected an error for truncated TCP options")
+	}
+}
+
 func TestSegmentTCPv4SubSplit(t *testing.T) {
 	// gso_size больше нашего maxSeg — порезка на подсегменты
 	frame, info := buildTCPGSOFrame(3000, 1400)
@@ -172,7 +211,7 @@ func TestSegmentUDPL4(t *testing.T) {
 		gsoType:    gsoTypeUDPL4,
 		gsoSize:    uint16(gsoSize),
 		csumStart:  20,
-		csumOffset: 20 + 6,
+		csumOffset: 6,
 	}
 	var segs [][]byte
 	err := segmentGSO(frame, info, 1300, func(seg []byte) {
@@ -204,10 +243,15 @@ func TestSegmentUDPL4(t *testing.T) {
 
 func TestFinalizeChecksumTCP(t *testing.T) {
 	// одиночный пакет с NEEDS_CSUM: после финализации чексумма валидна
-	frame, _ := buildTCPGSOFrame(1200, 0)
-	info := gsoInfo{flags: vnetFlagNeedsCsum, csumStart: 20, csumOffset: 36}
+	frame, info := buildTCPGSOFrame(1200, 0)
+	info.flags = vnetFlagNeedsCsum
+	binary.BigEndian.PutUint16(frame[36:38], 0xa123)
+	ipHeader := bytes.Clone(frame[:20])
 	if err := finalizeChecksum(frame, info); err != nil {
 		t.Fatalf("finalizeChecksum: %v", err)
+	}
+	if !bytes.Equal(frame[:20], ipHeader) {
+		t.Fatal("finalizeChecksum изменила IPv4-заголовок")
 	}
 	if !l4ChecksumValid(frame, 20) {
 		t.Fatal("после финализации TCP чексумма невалидна")

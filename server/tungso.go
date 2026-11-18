@@ -108,9 +108,11 @@ func pseudoSum(srcIP, dstIP []byte, proto byte, l4Len int) uint32 {
 
 // finalizeChecksum вычисляет полную транспортную чексумму для пакета с
 // NEEDS_CSUM: сумма по [csum_start:end] + псевдозаголовок, результат в
-// [csum_offset]. Работает для TCP и UDP, IPv4 и IPv6.
+// [csum_start + csum_offset]. Работает для TCP и UDP, IPv4 и IPv6.
 func finalizeChecksum(pkt []byte, info gsoInfo) error {
-	if len(pkt) < 20 || int(info.csumStart) > len(pkt) || int(info.csumOffset)+2 > len(pkt) {
+	start := int(info.csumStart)
+	checksumAt := start + int(info.csumOffset)
+	if len(pkt) < 20 || checksumAt+2 > len(pkt) {
 		return errors.New("gso: bad csum metadata")
 	}
 	ver := pkt[0] >> 4
@@ -121,7 +123,7 @@ func finalizeChecksum(pkt []byte, info gsoInfo) error {
 			return errors.New("gso: short ipv4")
 		}
 		ihl := int(pkt[0]&0x0f) * 4
-		if int(info.csumStart) < ihl {
+		if start < ihl {
 			return errors.New("gso: csum_start inside ip hdr")
 		}
 		proto = pkt[9]
@@ -137,16 +139,13 @@ func finalizeChecksum(pkt []byte, info gsoInfo) error {
 	} else {
 		return errors.New("gso: unknown ip version")
 	}
-	l4Len := len(pkt) - int(info.csumStart)
-	sum := pseudoSum(src, dst, proto, l4Len) + rawSum(pkt[info.csumStart:])
-	// нулевой чексумм-филд уже учтён как 0 — он в csum_offset и должен быть 0
-	// при расчёте; на практике там мусор частичной суммы — вычитаем его вклад.
-	fieldOff := int(info.csumOffset) - int(info.csumStart)
-	if fieldOff >= 0 && fieldOff+2 <= l4Len {
-		stored := uint32(pkt[int(info.csumStart)+fieldOff])<<8 | uint32(pkt[int(info.csumStart)+fieldOff+1])
-		sum -= stored // вычитаем вместо сложения: поле было включено в rawSum
+	pkt[checksumAt], pkt[checksumAt+1] = 0, 0
+	sum := pseudoSum(src, dst, proto, len(pkt)-start) + rawSum(pkt[start:])
+	checksum := foldSum(sum)
+	if proto == 17 && checksum == 0 {
+		checksum = 0xffff
 	}
-	binary.BigEndian.PutUint16(pkt[int(info.csumOffset):int(info.csumOffset)+2], foldSum(sum))
+	binary.BigEndian.PutUint16(pkt[checksumAt:checksumAt+2], checksum)
 	return nil
 }
 
@@ -209,16 +208,16 @@ func segmentL4(frame []byte, info gsoInfo, ipHdrLen, l4HdrLen, maxSeg int, hasIP
 	if len(frame) < l4Off+l4HdrLen {
 		return errors.New("gso: frame shorter than headers")
 	}
-	// doff для TCP
-	if l4HdrLen == 20 {
-		if len(frame) < l4Off+13 {
-			return errors.New("gso: short tcp")
-		}
+	isTCP := l4HdrLen == 20
+	if isTCP {
 		doff := int(frame[l4Off+12] >> 4)
 		if doff < 5 {
 			return errors.New("gso: bad tcp doff")
 		}
 		l4HdrLen = doff * 4
+		if len(frame) < l4Off+l4HdrLen {
+			return errors.New("gso: truncated tcp options")
+		}
 	}
 	payload := frame[l4Off+l4HdrLen:]
 	totalPayload := len(payload)
@@ -289,7 +288,7 @@ func segmentL4(frame []byte, info gsoInfo, ipHdrLen, l4HdrLen, maxSeg int, hasIP
 		}
 
 		// L4-заголовок
-		if l4HdrLen == 20 { // TCP
+		if isTCP {
 			binary.BigEndian.PutUint32(pkt[ipHdrLen+4:ipHdrLen+8], seq0+uint32(offset))
 			// PSH только на последнем сегменте (как tcp_gso_segment в ядре)
 			tcpFlags := pkt[ipHdrLen+13]
