@@ -91,6 +91,7 @@ type Dispatcher struct {
 	tunFile    *os.File // не nil в -mode rawtun: сырые IP-пакеты вместо локального WG-loopback
 	ready      chan struct{}
 	clientAddr atomic.Pointer[net.Addr]
+	pinner     flowPinner // только readLoop, для небольших UDP-потоков Raw
 	// mu сериализует ТОЛЬКО писателей снапшота воркеров (Register/Unregister —
 	// редкие события). Горячий путь читает снапшот через workersSnap без лока.
 	mu            sync.Mutex
@@ -310,6 +311,11 @@ func (d *Dispatcher) readLoop() {
 			d.rrIndex = (d.rrIndex + 1) % nw
 			d.rrCount = 0
 			d.chunkStartTs = now
+		}
+
+		if d.tunFile != nil && d.pinner.send(workers, pkt, now) {
+			atomic.AddUint64(&d.tunSentCount, 1)
+			continue
 		}
 
 		// Маленькие пакеты (вероятно ACK) — отдельный приоритетный канал с
