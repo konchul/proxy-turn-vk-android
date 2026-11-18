@@ -315,6 +315,9 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 			log.Printf("[STREAM %d] [VK Auth] Success via VK Calls path", streamID)
 			return user, pass, addrs, nil
 		} else {
+			if ctx.Err() != nil {
+				return "", "", nil, ctx.Err()
+			}
 			if callErr, ok := asCallUnavailableError(err); ok {
 				log.Printf("[STREAM %d] [VK Auth] VK Calls path returned non-retryable call error: %v", streamID, callErr)
 				return "", "", nil, callErr
@@ -339,8 +342,11 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 			return user, pass, addrs, nil
 		}
 
-		lastErr = err
-		log.Printf("[STREAM %d] [VK Auth] Failed with client_id=%s: %v", streamID, creds.ClientID, err)
+		if ctx.Err() != nil {
+			return "", "", nil, ctx.Err()
+		}
+		lastErr = redactCredentialRequestError(err)
+		log.Printf("[STREAM %d] [VK Auth] Failed with client_id=%s: %v", streamID, creds.ClientID, lastErr)
 
 		if callErr, ok := asCallUnavailableError(err); ok {
 			return "", "", nil, callErr

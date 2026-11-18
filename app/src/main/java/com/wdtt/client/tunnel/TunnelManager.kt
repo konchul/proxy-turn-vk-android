@@ -16,7 +16,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
@@ -1389,12 +1388,22 @@ object TunnelManager {
         return !unansweredTraffic
     }
 
-    fun reconnectAll(reason: String, force: Boolean = false, preserveVpn: Boolean = false) {
+    fun reconnectAll(
+        reason: String,
+        force: Boolean = false,
+        preserveVpn: Boolean = false,
+        coalesce: Boolean = false,
+    ) {
         val params = currentParams ?: return
         val context = lastContext?.get() ?: return
 
         scope.launch {
-            reconnectMutex.withLock {
+            if (coalesce) {
+                if (!reconnectMutex.tryLock()) return@launch
+            } else {
+                reconnectMutex.lock()
+            }
+            try {
                 val now = System.currentTimeMillis()
                 if (!force && now - lastReconnectAtMs < MIN_RECONNECT_INTERVAL_MS) {
                     updateLog("reconnect_skip", "Переподключение уже выполняется…", 50, false)
@@ -1438,7 +1447,7 @@ object TunnelManager {
                     config.value = null
                     start(context, params, isSwitching = true)
                     startJob?.join()
-                    if (currentParams == null || process == null) return@withLock
+                    if (currentParams == null || process == null) return@launch
                     if (params.isRawTunMode) {
                         awaitRawTunReady()
                     } else if (!params.isSocksMode) {
@@ -1454,6 +1463,8 @@ object TunnelManager {
                     transportRestartInProgress = false
                     isReconnecting.value = false
                 }
+            } finally {
+                reconnectMutex.unlock()
             }
         }
     }

@@ -75,6 +75,15 @@ func newVKCallsFailure(step string, kind vkCallsFailureKind, err error) error {
 	return &vkCallsFailure{Step: step, Kind: kind, Err: err}
 }
 
+// redactCredentialRequestError removes HTTP request URLs from diagnostic errors.
+func redactCredentialRequestError(err error) error {
+	var requestError *neturl.Error
+	for errors.As(err, &requestError) {
+		err = requestError.Err
+	}
+	return err
+}
+
 func describeVKCallsFailure(err error) string {
 	if err == nil {
 		return ""
@@ -152,7 +161,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 	doRequest := func(step string, url string) (map[string]interface{}, error) {
 		req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(nil))
 		if err != nil {
-			return nil, newVKCallsFailure(step, vkCallsFailureSetup, fmt.Errorf("create request: %w", err))
+			return nil, newVKCallsFailure(step, vkCallsFailureSetup, fmt.Errorf("create request: %w", redactCredentialRequestError(err)))
 		}
 		req.Header.Set("User-Agent", profile.UserAgent)
 		req.Header.Set("Accept", "*/*")
@@ -161,7 +170,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 
 		httpResp, err := client.Do(req)
 		if err != nil {
-			return nil, newVKCallsFailure(step, vkCallsFailureNetwork, fmt.Errorf("request failed: %w", err))
+			return nil, newVKCallsFailure(step, vkCallsFailureNetwork, fmt.Errorf("request failed: %w", redactCredentialRequestError(err)))
 		}
 		defer func() {
 			if closeErr := httpResp.Body.Close(); closeErr != nil {
@@ -176,7 +185,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 
 		var resp map[string]interface{}
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, newVKCallsFailure(step, vkCallsFailureDecode, fmt.Errorf("unmarshal JSON: %w, body: %s", err, truncateVKCallsLog(string(body), 200)))
+			return nil, newVKCallsFailure(step, vkCallsFailureDecode, fmt.Errorf("unmarshal credential JSON: %w", err))
 		}
 		return resp, nil
 	}
@@ -193,7 +202,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 	}
 	anonymToken, err := extractVKCallsStr(resp1, "response", "token")
 	if err != nil {
-		return "", "", nil, newVKCallsFailure(step1, vkCallsFailureParse, fmt.Errorf("parse token: %w (resp: %s)", err, truncateVKCallsResp(resp1)))
+		return "", "", nil, newVKCallsFailure(step1, vkCallsFailureParse, fmt.Errorf("parse token: %w", err))
 	}
 	anonymTokenEnc := neturl.QueryEscape(anonymToken)
 	log.Printf("[STREAM %d] [VKCalls] step1 OK, anonymous_token (%d chars)", streamID, len(anonymToken))
@@ -217,7 +226,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 	}
 	userIDFloat, err := extractVKCallsFloat(resp2, "response", "user_id")
 	if err != nil {
-		return "", "", nil, newVKCallsFailure(step2, vkCallsFailureParse, fmt.Errorf("parse user_id: %w (resp: %s)", err, truncateVKCallsResp(resp2)))
+		return "", "", nil, newVKCallsFailure(step2, vkCallsFailureParse, fmt.Errorf("parse user_id: %w", err))
 	}
 	userIDStr := fmt.Sprintf("%.0f", userIDFloat)
 	secret, err := extractVKCallsStr(resp2, "response", "secret")
@@ -246,7 +255,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 	}
 	okAnonymToken, err := extractVKCallsStr(resp3, "response", "token")
 	if err != nil {
-		return "", "", nil, newVKCallsFailure(step3, vkCallsFailureParse, fmt.Errorf("parse token: %w (resp: %s)", err, truncateVKCallsResp(resp3)))
+		return "", "", nil, newVKCallsFailure(step3, vkCallsFailureParse, fmt.Errorf("parse token: %w", err))
 	}
 	log.Printf("[STREAM %d] [VKCalls] step3 OK, OK anonymToken (%d chars)", streamID, len(okAnonymToken))
 
@@ -263,7 +272,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 	}
 	sessionKey, err := extractVKCallsStr(resp4, "session_key")
 	if err != nil {
-		return "", "", nil, newVKCallsFailure(step4, vkCallsFailureParse, fmt.Errorf("parse session_key: %w (resp: %s)", err, truncateVKCallsResp(resp4)))
+		return "", "", nil, newVKCallsFailure(step4, vkCallsFailureParse, fmt.Errorf("parse session_key: %w", err))
 	}
 	log.Printf("[STREAM %d] [VKCalls] step4 OK, OK session_key (%d chars)", streamID, len(sessionKey))
 
@@ -282,7 +291,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 
 	user, err := extractVKCallsStr(resp5, "turn_server", "username")
 	if err != nil {
-		return "", "", nil, newVKCallsFailure(step5, vkCallsFailureParse, fmt.Errorf("parse username: %w (resp: %s)", err, truncateVKCallsResp(resp5)))
+		return "", "", nil, newVKCallsFailure(step5, vkCallsFailureParse, fmt.Errorf("parse username: %w", err))
 	}
 	pass, err := extractVKCallsStr(resp5, "turn_server", "credential")
 	if err != nil {

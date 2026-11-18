@@ -71,7 +71,9 @@ func WorkerGroup(
 	if err == nil {
 		creds = &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID}
 	} else {
-		log.Printf("[ГРУППА #%d] Ошибка кредов: %v", groupID, err)
+		if ctx.Err() == nil {
+			log.Printf("[ГРУППА #%d] Ошибка кредов: %v", groupID, err)
+		}
 		return
 	}
 
