@@ -39,7 +39,10 @@ object TunnelManager {
     // 100% защита от утечек: единый управляемый глобальный Scope
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private var process: Process? = null
+    @Volatile private var process: Process? = null
+    @Volatile private var screenOn = true
+    @Volatile private var workerKeepaliveAvailable = false
+    private val goStdinLock = Any()
     private var readerJob: Job? = null
     private var watchdogJob: Job? = null
     private var detailedLogsJob: Job? = null
@@ -591,7 +594,10 @@ object TunnelManager {
                 val env = pb.environment()
                 env["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
 
-                process = pb.start()
+                val startedProcess = pb.start()
+                workerKeepaliveAvailable = false
+                process = startedProcess
+                if (!screenOn) writeScreenState(startedProcess)
                 processStartedAtMs = System.currentTimeMillis()
                 wrapAuthTimeoutCount = 0
                 lastActiveAtMs = 0L
@@ -803,6 +809,11 @@ object TunnelManager {
                                 handleVkAuthRequired(hash)
                             }
                         }
+                        return@forEachLine
+                    }
+
+                    if (lineTrim == "WORKER_KEEPALIVE_READY") {
+                        if (process === observedProcess) workerKeepaliveAvailable = true
                         return@forEachLine
                     }
 
@@ -1332,6 +1343,29 @@ object TunnelManager {
 
     fun isRawTunModeActive(): Boolean = currentParams?.isRawTunMode == true
 
+    fun supportsWorkerKeepalive(): Boolean = workerKeepaliveAvailable
+
+    fun setScreenOn(on: Boolean) {
+        if (screenOn == on) return
+        screenOn = on
+        scope.launch { process?.let(::writeScreenState) }
+    }
+
+    private fun writeScreenState(proc: Process) {
+        synchronized(goStdinLock) {
+            if (process !== proc || !proc.isAlive) return
+            val command = if (screenOn) "SCREEN_ON" else "SCREEN_OFF"
+            runCatching { writeGoLine(proc, "$command\n") }
+        }
+    }
+
+    private fun writeGoLine(proc: Process, line: String) {
+        synchronized(goStdinLock) {
+            proc.outputStream.write(line.toByteArray(Charsets.UTF_8))
+            proc.outputStream.flush()
+        }
+    }
+
     fun hasRecentTransportActivity(maxAgeMs: Long = 25_000L): Boolean {
         val now = System.currentTimeMillis()
         return running.value &&
@@ -1483,8 +1517,7 @@ object TunnelManager {
         process = null
         if (proc == null) return
         try {
-            proc.outputStream.write("STOP\n".toByteArray(Charsets.UTF_8))
-            proc.outputStream.flush()
+            writeGoLine(proc, "STOP\n")
         } catch (_: Exception) {
         }
         try {
@@ -1737,8 +1770,7 @@ object TunnelManager {
         if (proc == null || !proc.isAlive) return
         try {
             val line = "CAPTCHA_RESULT|$result\n"
-            proc.outputStream.write(line.toByteArray(Charsets.UTF_8))
-            proc.outputStream.flush()
+            writeGoLine(proc, line)
         } catch (e: Exception) {
             updateLog("captcha_write_err", "[КАПЧА] Ошибка записи: ${e.message}", 200, true)
         }
@@ -1771,8 +1803,7 @@ object TunnelManager {
         if (proc == null || !proc.isAlive) return
         try {
             val line = VkAuthWebViewManager.encodeTurnCredsPayload(hash, creds)
-            proc.outputStream.write(line.toByteArray(Charsets.UTF_8))
-            proc.outputStream.flush()
+            writeGoLine(proc, line)
         } catch (e: Exception) {
             updateLog("vk_auth_write_err", "Ошибка записи TURN: ${e.message}", 200, true)
         }
@@ -1782,8 +1813,7 @@ object TunnelManager {
         val proc = process
         if (proc == null || !proc.isAlive) return
         try {
-            proc.outputStream.write("TURN_CREDS|error:cancelled\n".toByteArray(Charsets.UTF_8))
-            proc.outputStream.flush()
+            writeGoLine(proc, "TURN_CREDS|error:cancelled\n")
         } catch (_: Exception) {
         }
     }

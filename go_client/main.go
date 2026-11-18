@@ -133,7 +133,7 @@ func main() {
 
 	var pauseFlag int32
 
-	// STDIN для PAUSE/RESUME/STOP и CAPTCHA_RESULT
+	// STDIN для управления запущенным процессом.
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
@@ -146,6 +146,10 @@ func main() {
 				atomic.StoreInt32(&pauseFlag, 1)
 			case line == "RESUME":
 				atomic.StoreInt32(&pauseFlag, 0)
+			case line == "SCREEN_OFF":
+				lowPowerMode.Store(true)
+			case line == "SCREEN_ON":
+				lowPowerMode.Store(false)
 			case line == "STOP":
 				cancel()
 				return

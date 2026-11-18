@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,20 +24,12 @@ import (
 
 const (
 	workerSendBuf = 128
-	// 90с без даунлинка = кандидат на мёртвую сессию (сервер шлёт понг на наш
-	// keepalive каждые 25с, так что живая сессия молчать не может). Три
-	// таймаута подряд -> сессия пересоздаётся (новый TURN-allocation, новый
-	// 4-tuple — обходит молчаливый дроп провайдера после простоя).
+	// Резервный таймаут чтения для серверов без ответа на keepalive.
 	sessionReadTimeout    = 90 * time.Second
 	sessionReadTimeoutMax = 3
 	readBufSize           = 1600
 	socketBufSize         = 625 * 1024
 	keepaliveByte         = 0xFF // keepalive marker (DTLS-level или прямой obfs-кадр)
-	// keepaliveInterval: 25с. TURN permission живёт 300с (RFC 5766), NAT-
-	// маппинги на мобильных сетях — от 30с; серверный idleTimeout — 90с
-	// (3 хартбита в окно). Прежние 10с давали ~1.8 пробуждения радио/с на
-	// группе из 9 воркеров (obfs KA + TURN binding) — разряд батареи.
-	keepaliveInterval = 25 * time.Second
 	// keepaliveMinSize/keepaliveMaxSize: keepalive-пакет теперь не
 	// фиксированного размера (было 1 байт постоянно) — случайная длина
 	// 25-44 байта имитирует "тишину" OPUS в реальном звонке; постоянный
@@ -44,6 +37,8 @@ const (
 	keepaliveMinSize = 25
 	keepaliveMaxSize = 20 // диапазон добавки к keepaliveMinSize (rand.Intn(20))
 )
+
+var errWorkerUnresponsive = errors.New("worker stopped receiving packets")
 
 // obfsDirectConn — net.Conn поверх TURN relay БЕЗ DTLS.
 //
@@ -565,32 +560,19 @@ func RunSession(
 	})
 	defer stopConn()
 
-	if tp.RawMode {
-		// Транспорт — UDP через TURN, у сервера нет способа узнать о разрыве
-		// соединения кроме таймаута (см. handleConnRaw). Явно сообщаем о
-		// намеренном отключении, чтобы сервер сразу освободил слот в
-		// rawRouter вместо того чтобы ждать простоя — иначе "мёртвые"
-		// соединения от прошлого сеанса засоряют round-robin в downlinkLoop
-		// при быстром переподключении того же устройства.
-		go func() {
-			select {
-			case <-ctx.Done():
-				_ = activeConn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
-				_, _ = activeConn.Write([]byte("DISCONNECT_RAW:" + deviceID))
-			case <-sessCtx.Done():
-			}
-		}()
-	}
+	var workerUnresponsive atomic.Bool
 
 	// Keepalive: prevents TURN allocation timeout and idle disconnect.
 	// Пакет не пишется напрямую в activeConn (это была бы вторая горутина,
 	// конкурирующая за conn с основным Writer'ом ниже) — кладётся в
 	// slot.PrioCh неблокирующе, тем же путём, что и мелкие ACK-пакеты, и
 	// уходит через единственную writer-горутину.
+	liveness := newSessionLiveness(time.Now())
 	go func() {
 		defer proxyWg.Done()
-		t := time.NewTicker(keepaliveInterval)
+		t := time.NewTicker(livenessTick)
 		defer t.Stop()
+		planner := newLivenessPlanner(liveness, time.Now())
 
 		didBytes := make([]byte, 16)
 		copy(didBytes, deviceID)
@@ -600,6 +582,20 @@ func RunSession(
 			case <-sessCtx.Done():
 				return
 			case <-t.C:
+				// После сна используем текущее время: в канале мог остаться старый тик.
+				step := planner.step(time.Now(), lowPowerMode.Load())
+				if step.dead {
+					workerUnresponsive.Store(true)
+					select {
+					case sessionErrCh <- fmt.Errorf("%w: %s", errWorkerUnresponsive, step.silent.Round(time.Second)):
+					default:
+					}
+					sessCancel()
+					return
+				}
+				if !step.sendKeepalive {
+					continue
+				}
 				size := keepaliveMinSize + rand.Intn(keepaliveMaxSize)
 				pkt := getPktBuf(size)
 				pkt[0] = keepaliveByte
@@ -639,6 +635,14 @@ func RunSession(
 				default:
 					return
 				}
+			}
+		}()
+		defer func() {
+			// По возможности освобождаем серверный Raw-слот перед переподключением.
+			// Только writer пишет в activeConn, включая сообщение об отключении.
+			if tp.RawMode && (ctx.Err() != nil || workerUnresponsive.Load()) {
+				_ = activeConn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+				_, _ = activeConn.Write([]byte("DISCONNECT_RAW:" + deviceID))
 			}
 		}()
 		for {
@@ -714,12 +718,15 @@ func RunSession(
 				return
 			}
 
-			// Skip keepalive pong from server
+			idleReadTimeouts = 0
+			now := time.Now()
 			if n == 1 && b[0] == keepaliveByte {
+				if liveness.notePong(now) {
+					fmt.Println("WORKER_KEEPALIVE_READY")
+				}
 				continue
 			}
-
-			idleReadTimeouts = 0
+			liveness.noteRx(now)
 			if atomic.CompareAndSwapUint32(&firstWireRead, 0, 1) {
 				log.Printf("[ВОРКЕР #%d] [ДЕБАГ] Получен ПЕРВЫЙ пакет из соединения (%d байт)", sessionID, n)
 			}

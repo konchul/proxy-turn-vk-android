@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand"
 	"net"
@@ -189,7 +190,8 @@ func WorkerGroup(
 					}
 					errStr := sessErr.Error()
 					errStrLower := strings.ToLower(errStr)
-					fastRetry = strings.Contains(errStrLower, "broken pipe") ||
+					fastRetry = errors.Is(sessErr, errWorkerUnresponsive) ||
+						strings.Contains(errStrLower, "broken pipe") ||
 						strings.Contains(errStrLower, "connection reset by peer") ||
 						strings.Contains(errStrLower, "unexpected eof")
 

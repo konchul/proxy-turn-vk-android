@@ -29,7 +29,7 @@ import kotlinx.coroutines.flow.collectLatest
 
 private const val TUNNEL_NOTIFICATION_CHANNEL_ID = NotificationHelper.TUNNEL_CHANNEL_ID
 private const val TUNNEL_NOTIFICATION_ID = 1
-private const val RAW_WAKE_RESTART_THRESHOLD_MS = 60_000L
+private const val LEGACY_RAW_WAKE_THRESHOLD_MS = 60_000L
 
 class TunnelService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -504,12 +504,14 @@ class TunnelService : Service() {
 
     private fun setupScreenStateReceiver() {
         deviceWasInteractive = (getSystemService(POWER_SERVICE) as PowerManager).isInteractive
+        TunnelManager.setScreenOn(deviceWasInteractive)
         if (!deviceWasInteractive) screenOffAtMs = System.currentTimeMillis()
         screenStateReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: android.content.Context?, intent: Intent?) {
                 when (intent?.action) {
                     Intent.ACTION_SCREEN_OFF -> {
                         deviceWasInteractive = false
+                        TunnelManager.setScreenOn(false)
                         screenOffAtMs = System.currentTimeMillis()
                         wakeRecoveryJob?.cancel()
                         wakeRecoveryJob = null
@@ -518,6 +520,7 @@ class TunnelService : Service() {
                     }
                     Intent.ACTION_SCREEN_ON -> {
                         deviceWasInteractive = true
+                        TunnelManager.setScreenOn(true)
                         val now = System.currentTimeMillis()
                         val screenOffDurationMs = if (screenOffAtMs > 0L) now - screenOffAtMs else 0L
                         screenOffAtMs = 0L
@@ -534,41 +537,29 @@ class TunnelService : Service() {
 
     private fun scheduleWakeRecovery(screenOffDurationMs: Long) {
         wakeRecoveryJob?.cancel()
-        val restartRawTransport = TunnelManager.isRawTunModeActive() &&
-            screenOffDurationMs >= RAW_WAKE_RESTART_THRESHOLD_MS
-        wakeGraceUntilMs = System.currentTimeMillis() + if (restartRawTransport) 45_000L else 30_000L
+        val wokeAtMs = System.currentTimeMillis()
+        val rawAfterLongSleep = TunnelManager.isRawTunModeActive() &&
+            screenOffDurationMs >= LEGACY_RAW_WAKE_THRESHOLD_MS
+        wakeGraceUntilMs = wokeAtMs + 30_000L
         wakeRecoveryJob = TunnelManager.scope.launch {
             if (!TunnelManager.running.value || isTunnelPaused) return@launch
-            if (restartRawTransport) {
-                networkRecoveryJob?.cancel()
-                TunnelManager.addNetworkLog("[СОН] RAW был в фоне ${screenOffDurationMs / 1000} сек. Обновляем транспортные потоки.")
-                val validationDeadline = System.currentTimeMillis() + 20_000L
-                while (!hasValidatedUnderlyingNetwork() && System.currentTimeMillis() < validationDeadline) {
-                    if (!deviceWasInteractive || !TunnelManager.running.value || isTunnelPaused) return@launch
-                    delay(500)
-                }
-                if (!deviceWasInteractive || !TunnelManager.running.value || isTunnelPaused ||
-                    !hasValidatedUnderlyingNetwork()) return@launch
-                delay(2_000)
-                if (!deviceWasInteractive || !TunnelManager.running.value || isTunnelPaused) return@launch
-                lastNetworkRecoveryAttemptMs = System.currentTimeMillis()
-                updateNotification("Восстановление после сна...")
-                TunnelManager.restartTransport("пробуждение RAW после сна", force = true)
-                return@launch
-            }
-            TunnelManager.addNetworkLog("[СОН] Устройство проснулось; даём текущему VPN восстановиться без перезапуска.")
+            TunnelManager.addNetworkLog("[СОН] Устройство проснулось. Проверяем текущие потоки.")
             delay(30_000)
-            if (!deviceWasInteractive || !TunnelManager.running.value || isTunnelPaused || !hasValidatedUnderlyingNetwork()) return@launch
-            if (TunnelManager.hasRecentTransportActivity(45_000L)) {
-                TunnelManager.addNetworkLog("[СОН] VPN подал свежие признаки жизни после пробуждения.")
+            if (!deviceWasInteractive || !TunnelManager.running.value || isTunnelPaused ||
+                !hasValidatedUnderlyingNetwork() || TunnelManager.isReconnecting.value) return@launch
+
+            val legacyRawNeedsRecovery = rawAfterLongSleep && !TunnelManager.supportsWorkerKeepalive() &&
+                !TunnelManager.hasDownlinkTrafficSince(wokeAtMs)
+            if (!legacyRawNeedsRecovery && TunnelManager.hasRecentTransportActivity(45_000L)) {
+                TunnelManager.addNetworkLog("[СОН] Транспорт продолжает работать после пробуждения.")
                 return@launch
             }
             val now = System.currentTimeMillis()
             if (now - lastNetworkRecoveryAttemptMs < 120_000L) return@launch
             lastNetworkRecoveryAttemptMs = now
             updateNotification("Восстановление после сна...")
-            TunnelManager.addNetworkLog("[СОН] VPN не ожил после пробуждения. Мягко переподключаем транспорт.")
-            TunnelManager.restartTransport()
+            TunnelManager.addNetworkLog("[СОН] VPN не ожил после пробуждения. Переподключаем транспорт.")
+            TunnelManager.restartTransport("пробуждение после сна")
         }
     }
 

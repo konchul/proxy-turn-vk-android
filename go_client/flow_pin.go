@@ -25,6 +25,7 @@ const (
 )
 
 type udpFlowKey struct {
+	ipVersion    byte
 	src, dst     [16]byte
 	sport, dport uint16
 }
@@ -47,7 +48,8 @@ func parseUDPFlowKey(pkt []byte) (udpFlowKey, bool) {
 	if len(pkt) < 1 {
 		return k, false
 	}
-	switch pkt[0] >> 4 {
+	k.ipVersion = pkt[0] >> 4
+	switch k.ipVersion {
 	case 4:
 		if len(pkt) < 20 {
 			return k, false
