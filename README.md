@@ -1,8 +1,10 @@
 # qWDTT
 
+![qWDTT «Контур» для Android: туннель, профили, обход и логи](docs/qwdtt-contour-banner.png)
+
 VPN-клиент для Android и сервер для Linux. Клиент передаёт трафик через TURN-ретранслятор на ваш сервер. Поддерживаются WireGuard, Raw TUN и локальный SOCKS5. Форк основан на [SpaceNeuroX/proxy-turn-vk-android v1.4.4](https://github.com/SpaceNeuroX/proxy-turn-vk-android/releases/tag/v1.4.4). Исходный проект — [amurcanov/proxy-turn-vk-android](https://github.com/amurcanov/proxy-turn-vk-android).
 
-[Последний релиз](https://github.com/konchul/proxy-turn-vk-android/releases/latest) · [Установка сервера](#установка-сервера) · [Бенчмарки](#бенчмарки) · [Сборка](#сборка)
+[Последний релиз](https://github.com/konchul/proxy-turn-vk-android/releases/latest) · [Установка сервера](#установка-сервера) · [Бенчмарки](#бенчмарки) · [Сборка](#сборка) · [Contributors](#contributors)
 
 ## Android
 
@@ -123,6 +125,10 @@ go test ./server
 ```
 
 Серверная реализация описана в [документе об оптимизациях](docs/OPTIMIZATIONS.md).
+
+## Contributors
+
+- [@konchul](https://github.com/konchul) — разработка и поддержка qWDTT.
 
 ## Лицензия
 
