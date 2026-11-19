@@ -19,6 +19,9 @@ data class ParsedRemoteSubscription(
 )
 
 object SubscriptionImport {
+    private val configLinkPrefix = Regex("^(qwdtt|27white):(?://)?config(?=[?#]|$)", RegexOption.IGNORE_CASE)
+
+    internal fun isConfigLink(text: String): Boolean = configLinkPrefix.containsMatchIn(text)
 
     suspend fun fetch(url: String): Result<ParsedRemoteSubscription> = withContext(Dispatchers.IO) {
         try {
@@ -56,7 +59,7 @@ object SubscriptionImport {
         if (trimmed.isEmpty()) return null
 
         var jsonStr = trimmed
-        if (!trimmed.startsWith("[") && !trimmed.startsWith("{") && !trimmed.startsWith("qwdtt:")) {
+        if (!trimmed.startsWith("[") && !trimmed.startsWith("{") && !isConfigLink(trimmed)) {
             try {
                 val decoded = android.util.Base64.decode(trimmed, android.util.Base64.DEFAULT)
                 jsonStr = String(decoded, Charsets.UTF_8).trim()
@@ -64,8 +67,8 @@ object SubscriptionImport {
             }
         }
 
-        if (jsonStr.startsWith("qwdtt://config") || jsonStr.startsWith("qwdtt:config")) {
-            val single = parseQwdttUri(jsonStr) ?: return null
+        if (isConfigLink(jsonStr)) {
+            val single = parseConfigLink(jsonStr) ?: return null
             return ParsedRemoteSubscription(profiles = listOf(single), subscriptionName = single.name)
         }
 
@@ -165,13 +168,18 @@ object SubscriptionImport {
         )
     }
 
-    private fun parseQwdttUri(trimmed: String): ConnectionProfile? {
+    internal fun parseConfigLink(trimmed: String, defaultWorkers: Int = 9): ConnectionProfile? {
+        val prefix = configLinkPrefix.find(trimmed) ?: return null
         return try {
-            val uri = android.net.Uri.parse(trimmed.replace("qwdtt:config", "qwdtt://config"))
+            val uri = android.net.Uri.parse("qwdtt://config" + trimmed.substring(prefix.range.last + 1))
             val name = uri.getQueryParameter("name") ?: "QR Профиль"
-            val peer = uri.getQueryParameter("peer") ?: return null
+            val peerRaw = uri.getQueryParameter("peer")?.takeIf { it.isNotBlank() } ?: return null
+            val portHint = uri.getQueryParameter("dtls_port") ?: uri.getQueryParameter("server_port")
+            val peer = if (portHint != null) {
+                PeerAddress.ensurePort(peerRaw, portHint.toIntOrNull()?.coerceIn(1, 65535) ?: 56000)
+            } else peerRaw
             val hashes = uri.getQueryParameter("hashes") ?: ""
-            val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: 9
+            val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: defaultWorkers
             val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 9000
             val pass = uri.getQueryParameter("pass") ?: uri.getQueryParameter("password") ?: ""
             ConnectionProfile(

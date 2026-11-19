@@ -197,6 +197,21 @@ html,body,#qwdtt { width:100%; height:100%; margin:0; padding:0; overflow:hidden
 #qwdtt textarea { min-height:88px; resize:vertical; }
 #qwdtt .qd-side-actions { display:flex; flex-wrap:wrap; gap:3px; margin:7px 0; }
 #qwdtt .qd-side-actions button { background:var(--panel); }
+#qwdtt .qd-delete-dialog {
+  width:min(360px,calc(100% - 32px)); max-height:calc(100% - 32px); overflow:auto;
+  padding:20px; border:1px solid var(--line); border-radius:var(--inner);
+  background:var(--panel); color:var(--ink); box-shadow:0 16px 48px #0009;
+}
+#qwdtt .qd-delete-dialog::backdrop { background:#000b; }
+#qwdtt .qd-delete-dialog h2 { margin:0 0 8px; font-size:18px; }
+#qwdtt .qd-delete-dialog p { margin:0 0 16px; color:var(--dim); overflow-wrap:anywhere; }
+#qwdtt .qd-delete-dialog [data-delete-error] { color:#ff9ba5; }
+#qwdtt .qd-delete-dialog [data-delete-error]:empty { display:none; }
+#qwdtt .qd-delete-actions { display:flex; flex-wrap:wrap; gap:8px; }
+#qwdtt .qd-delete-actions button { flex:1; border:1px solid var(--line); border-radius:10px; }
+#qwdtt .qd-delete-actions [data-act="profile.delete.confirm"] {
+  color:#ffb4bd; background:#391e23; border-color:#75404a;
+}
 #qwdtt .qd-secret { font-size:11px; color:var(--dim); }
 #qwdtt .qd-qr { display:block; width:min(75%,212px); margin:10px auto; border-radius:4px; }
 #qwdtt .qd-galaxy { white-space:pre; line-height:7.6px; }

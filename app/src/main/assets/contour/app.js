@@ -111,6 +111,9 @@
     const english = window.qwdttEnglish;
     return state.lang === "en" && english && Object.prototype.hasOwnProperty.call(english,text) ? english[text] : text;
   };
+  const tunnelError = () => state.timeout
+    ? t("Этап «{step}» не завершился за {seconds} с").replace("{step}",t(state.failed)).replace("{seconds}",state.timeout)
+    : t(state.error || "");
   let draft, ports, socksSettings, dns, hashes, exported, importText = "", server, access, passwordEdit, routeApps = [];
   let tunnelPing = {}, profilePing = "", hashProbe, hashStatuses = {}, countryQuery = "";
   let picker = false, dnsList = false, activeGroup = "", busy = false, toastTimer;
@@ -197,7 +200,7 @@
   }
   function home() {
     return hero() + `<div data-stages>${stages()}</div><div data-toggle>${tunnelAction()}</div>
-      <p class="qd-error" data-error>${esc(t(state.error || ""))}</p>
+      <p class="qd-error" data-error>${esc(tunnelError())}</p>
       <section class="qd-latency" aria-labelledby="qd-latency-label">
         <div class="qd-latency-main">
           <div class="qd-metric-stack">
@@ -265,7 +268,8 @@
         ${sw("bool:autoRoutes","Автообновление обхода",state.autoRoutes)}
         ${link("update","Проверить обновления",state.version || ">")}
         ${link("notifications","Уведомления Android",">")}
-      </div></details><p class="qd-note qd-credits">Apple Color Emoji © Apple Inc. · EmojiTwo (EmojiOne 2.2, Ranks.com, CC BY 4.0)</p>`;
+      </div></details><div class="qd-block">${link("github","Проект на GitHub",">","konchul/proxy-turn-vk-android")}</div>
+      <p class="qd-note qd-credits">Apple Color Emoji © Apple Inc. · EmojiTwo (EmojiOne 2.2, Ranks.com, CC BY 4.0)</p>`;
   }
   function bypassPage() {
     const mode = state.whitelist ? "Через туннель идут выбранные приложения и адреса." : "Выбранные приложения и адреса идут мимо туннеля.";
@@ -483,7 +487,7 @@
       if (stage) stage.innerHTML = stages();
       paintPing();
       const error = phone.querySelector("[data-error]");
-      if (error) error.textContent = t(state.error || "");
+      if (error) error.textContent = tunnelError();
     }
     if (state.section === "mode" && changed) render();
     const log = phone.querySelector("[data-log]");
@@ -505,6 +509,8 @@
     render("back",true);
   }
   function back() {
+    const dialog = phone.querySelector(".qd-delete-dialog[open]");
+    if (dialog) { if (!busy) closeProfileDelete(dialog); return; }
     if (picker) { picker=false; render("picker"); return; }
     if (state.section) {
       const closed=state.section;
@@ -519,6 +525,33 @@
     render("",true);
   }
   window.qwdttBack = back;
+
+  function closeProfileDelete(dialog) {
+    dialog.close();
+    dialog.remove();
+  }
+
+  function confirmProfileDelete() {
+    if (busy || !draft?.id || phone.querySelector(".qd-delete-dialog")) return;
+    const dialog = document.createElement("dialog");
+    const profile = state.profiles.find(item => item.id === draft.id);
+    dialog.className = "qd-delete-dialog";
+    dialog.setAttribute("aria-labelledby","qd-delete-title");
+    dialog.setAttribute("aria-describedby","qd-delete-name");
+    dialog.innerHTML = `<h2 id="qd-delete-title">${t("Удалить этот профиль?")}</h2>
+      <p id="qd-delete-name">${esc(profile?.name || draft.name)}</p>
+      <p class="qd-error" data-delete-error role="status"></p>
+      <div class="qd-delete-actions">
+        <button autofocus type="button" data-act="profile.delete.cancel">${t("Отмена")}</button>
+        <button type="button" data-act="profile.delete.confirm">${t("Удалить")}</button>
+      </div>`;
+    dialog.addEventListener("cancel",event=>{
+      event.preventDefault();
+      if (!busy) closeProfileDelete(dialog);
+    });
+    phone.append(dialog);
+    dialog.showModal();
+  }
 
   async function run(action,args,callback,onError=showError,onRequest) {
     if (busy) return;
@@ -595,11 +628,27 @@
         if (state.section==="add") back();
         await mutate(action); return;
       case "subscription.refresh": await mutate(action,{id:a}); return;
-      case "profile.delete": if (confirm(t("Удалить этот профиль?"))) await run(action,{id:draft.id},async()=>{back();await refresh();}); return;
+      case "profile.delete": confirmProfileDelete(); return;
+      case "profile.delete.cancel": back(); return;
+      case "profile.delete.confirm": {
+        const dialog=target.closest("dialog");
+        if (busy || !dialog?.open) return;
+        for (const button of dialog.querySelectorAll("button")) button.disabled=true;
+        await run("profile.delete",{id:draft.id},async()=>{
+          closeProfileDelete(dialog);
+          back();
+          await refresh();
+        },error=>{
+          if (dialog.open) dialog.querySelector("[data-delete-error]").textContent=t(error.message);
+          else showError(error);
+        });
+        for (const button of dialog.querySelectorAll("button")) button.disabled=false;
+        return;
+      }
       case "apps": await run("bypass.apps",{},value=>{routeApps=value;open("apps");}); return;
       case "bypass-import": await mutate(action); return;
       case "bypass-export": await run("export.file",{kind:"bypass"},()=>{}); return;
-      case "logs.copy": case "logs.share": case "logs.clear": case "notifications": case "update": await run(action,{},value=>{if(value)showError(value);}); return;
+      case "logs.copy": case "logs.share": case "logs.clear": case "notifications": case "update": case "github": await run(action,{},value=>{if(value)showError(value);}); return;
       case "socks": await run("socks.read",{},value=>{socksSettings=value;open("socks");}); return;
       case "server.new": server={login:"root",port:22}; open("server"); return;
       case "server.edit": await run("server.read",{id:a},value=>{server=value;open("server");}); return;
@@ -665,7 +714,7 @@
   });
   phone.addEventListener("error",event=>{ if (event.target instanceof HTMLImageElement) event.target.hidden=true; },true);
   phone.addEventListener("contextmenu",event=>{ if (!event.target.closest(".qd-field input, textarea")) event.preventDefault(); });
-  document.addEventListener("keydown",e=>{if(e.key==="Escape")back();});
+  document.addEventListener("keydown",e=>{if(e.key==="Escape"){e.preventDefault();back();}});
   reducedMotion.addEventListener("change",showGalaxy);
   render();
   refresh().catch(showError);

@@ -9,7 +9,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.getAndUpdate
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -148,11 +152,7 @@ object TunnelManager {
     private const val CONNECT_STOP_GRACE_MS = 2_500L
     /** После успешного подключения схема скрывается, чтобы не занимать логи. */
     private const val PIPELINE_HIDE_AFTER_SUCCESS_MS = 4_000L
-    /** Лимит на один шаг схемы (кроме Потоков и Капчи). */
-    private const val PIPELINE_STEP_TIMEOUT_MS = 10_000L
-    private const val PIPELINE_RAW_STEP_TIMEOUT_MS = 25_000L
-    /** Вход в несколько звонков через аккаунт VK может занять дольше. */
-    private const val PIPELINE_VK_STEP_TIMEOUT_MS = 30_000L
+    private const val INITIAL_STEP_TIMEOUT_MS = 15_000L
     /** Инкремент → MainActivity / SettingsTab открывают диалог ⚙️ настроек. */
     val openAppSettingsRequest = MutableStateFlow(0L)
 
@@ -291,6 +291,7 @@ object TunnelManager {
         
         val appContext = context.applicationContext // Защита от Memory Leak
         
+        cancelPipelineStepTimeout()
         if (!isSwitching) {
             clearLogs()
             lastFatalError.value = null
@@ -301,6 +302,7 @@ object TunnelManager {
             connectingStartedAtMs = System.currentTimeMillis()
             isConnecting.value = true
             stats.value = "Подключение…"
+            watchInitialConnection()
             
             detailedLogsJob?.cancel()
             detailedLogsJob = scope.launch {
@@ -360,7 +362,6 @@ object TunnelManager {
                         SettingsStore(appContext).connectionPipelineEnabled.first()
                     }.getOrDefault(true)
                     connectionPipeline.update { it.copy(visible = isConnectionPipelineEnabled) }
-                    armPipelineStepTimeout(connectionPipeline.value.current)
                 }
 
                 if (!isSwitching) {
@@ -631,6 +632,7 @@ object TunnelManager {
     }
 
     private fun finishConnectingFailed() {
+        cancelPipelineStepTimeout()
         transportRestartInProgress = false
         isConnecting.value = false
         markRunning(false)
@@ -1885,7 +1887,6 @@ object TunnelManager {
             // классического VPN-режима.
             dtlsUsed = currentParams?.let { !it.noDtls && !it.isRawTunMode } ?: true,
         )
-        armPipelineStepTimeout(ConnectionStep.DNS)
     }
 
     private fun transportPipelineStep(): ConnectionStep = when {
@@ -1934,7 +1935,6 @@ object TunnelManager {
     }
 
     private fun dismissConnectionPipeline() {
-        cancelPipelineStepTimeout()
         connectionPipeline.update { it.copy(visible = false) }
     }
 
@@ -1953,78 +1953,45 @@ object TunnelManager {
         pipelineStepTimeoutJob = null
     }
 
-    private fun isAccountVkAuthActive(): Boolean =
-        currentParams?.vkAuthMode?.equals("anonymous", ignoreCase = true) == false
-
-    private fun pipelineTimeoutFor(step: ConnectionStep): Long = when (step) {
-        ConnectionStep.VK -> PIPELINE_VK_STEP_TIMEOUT_MS
-        ConnectionStep.RAW -> PIPELINE_RAW_STEP_TIMEOUT_MS
-        else -> PIPELINE_STEP_TIMEOUT_MS
-    }
-
-    private fun armPipelineStepTimeout(step: ConnectionStep?) {
-        cancelPipelineStepTimeout()
-        if (!isConnectionPipelineEnabled || !connectionPipeline.value.visible) return
-        if (step == null || step == ConnectionStep.DONE) return
-        // Много потоков поднимаются постепенно; капча / вход по аккаунту VK ждут пользователя.
-        if (step == ConnectionStep.WORKERS || step == ConnectionStep.CAPTCHA) return
-        if (step == ConnectionStep.VK && isAccountVkAuthActive()) return
-
-        val timeoutMs = pipelineTimeoutFor(step)
+    private fun watchInitialConnection() {
         pipelineStepTimeoutJob = scope.launch {
-            delay(timeoutMs)
-            val state = connectionPipeline.value
-            if (!state.visible || state.failed != null || state.current != step) return@launch
-            onPipelineStepTimeout(step, timeoutMs)
+            connectionPipeline
+                .map { state -> state.current.takeIf { state.failed == null } }
+                .distinctUntilChanged()
+                .collectLatest { step ->
+                    if (step == null || step == ConnectionStep.DONE) return@collectLatest
+                    delay(INITIAL_STEP_TIMEOUT_MS)
+                    onPipelineStepTimeout(step)
+                }
         }
     }
 
-    private fun onPipelineStepTimeout(step: ConnectionStep, timeoutMs: Long = pipelineTimeoutFor(step)) {
-        cancelPipelineStepTimeout()
-        pipelineHideJob?.cancel()
-        pipelineHideJob = null
-        connectionPipeline.update { state ->
-            if (!state.visible) {
-                state
-            } else {
-                state.copy(failed = step, timedOut = true, current = step, timeoutSec = (timeoutMs / 1000L).toInt())
-            }
+    private fun onPipelineStepTimeout(step: ConnectionStep) {
+        val seconds = (INITIAL_STEP_TIMEOUT_MS / 1000).toInt()
+        val previous = connectionPipeline.getAndUpdate { state ->
+            if (state.failed != null || state.current != step) state
+            else state.copy(failed = step, timedOut = true, timeoutSec = seconds)
         }
+        if (previous.failed != null || previous.current != step) return
         updateLog(
             "pipeline_timeout",
-            "[СХЕМА] Шаг «${step.label}» не завершился за ${timeoutMs / 1000} с — подключение остановлено",
+            "[СХЕМА] Шаг «${step.label}» не завершился за $seconds с — подключение остановлено",
             99,
             true
         )
-        startJob?.cancel()
-        startJob = null
-        if (running.value || process != null) {
-            stopRawTunIfNeeded()
-            scope.launch(Dispatchers.Main) {
-                wgHelper?.stopTunnel()
-            }
-            killProcess()
-            markRunning(false)
-            isConnecting.value = false
-            activeWorkers.value = 0
-            currentParams = null
-            runCatching { ManlCaptchaWebViewManager.cancelCaptcha() }
-        } else {
-            finishConnectingFailed()
-        }
+        stop(force = true)
     }
 
     private fun setConnectionPipelineCurrent(step: ConnectionStep) {
         connectionPipeline.update { state ->
-            if (state.current == null || state.current.order > step.order || step in state.completed) state
+            if (state.timedOut || state.current == null || state.current.order > step.order || step in state.completed) state
             else state.copy(current = step, failed = null, timedOut = false)
         }
-        if (connectionPipeline.value.current == step) armPipelineStepTimeout(step)
     }
 
     private fun markConnectionPipelineCompleted(step: ConnectionStep) {
         connectionPipeline.update { state ->
-            if (state.current == null || state.current == ConnectionStep.DONE) {
+            if (state.timedOut || state.current == null || state.current == ConnectionStep.DONE) {
                 state
             } else {
                 state.copy(completed = state.completed + step, failed = state.failed.takeUnless { it == step })
@@ -2034,7 +2001,7 @@ object TunnelManager {
 
     private fun markConnectionPipelineCaptchaRequired() {
         connectionPipeline.update { state ->
-            if (state.current == null || state.current == ConnectionStep.DONE) {
+            if (state.timedOut || state.current == null || state.current == ConnectionStep.DONE) {
                 state
             } else {
                 state.copy(
@@ -2045,12 +2012,11 @@ object TunnelManager {
                 )
             }
         }
-        armPipelineStepTimeout(ConnectionStep.CAPTCHA)
     }
 
     private fun advanceConnectionPipeline(completed: ConnectionStep, next: ConnectionStep) {
         connectionPipeline.update { state ->
-            if (state.current == null || state.current == ConnectionStep.DONE) {
+            if (state.timedOut || state.current == null || state.current == ConnectionStep.DONE) {
                 state
             } else {
                 state.copy(
@@ -2060,7 +2026,6 @@ object TunnelManager {
                 )
             }
         }
-        if (connectionPipeline.value.current == next) armPipelineStepTimeout(next)
     }
 
     private fun failConnectionPipeline(step: ConnectionStep) {
@@ -2068,7 +2033,7 @@ object TunnelManager {
         pipelineHideJob = null
         cancelPipelineStepTimeout()
         connectionPipeline.update { state ->
-            if (state.current == null || state.current == ConnectionStep.DONE || step in state.completed) state
+            if (state.timedOut || state.current == null || state.current == ConnectionStep.DONE || step in state.completed) state
             else state.copy(failed = step, timedOut = false)
         }
     }
@@ -2076,7 +2041,7 @@ object TunnelManager {
     private fun finishConnectionPipeline() {
         var shouldScheduleHide = false
         connectionPipeline.update { state ->
-            if (state.current == null || state.current == ConnectionStep.DONE ||
+            if (state.timedOut || state.current == null || state.current == ConnectionStep.DONE ||
                 ConnectionStep.WORKERS !in state.completed || state.finalTransportStep() !in state.completed
             ) {
                 state

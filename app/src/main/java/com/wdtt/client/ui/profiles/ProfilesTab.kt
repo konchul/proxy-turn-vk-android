@@ -46,6 +46,7 @@ import androidx.compose.ui.text.PlatformTextStyle
 import com.wdtt.client.PeerAddress
 import com.wdtt.client.ConnectionProfile
 import com.wdtt.client.ProfilesStore
+import com.wdtt.client.SubscriptionImport
 import android.widget.Toast
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -2042,35 +2043,7 @@ internal fun parseQrConfig(rawText: String): ConnectionProfile? {
         }
     }
 
-    // 1. Try URL scheme
-    if (trimmed.startsWith("qwdtt://config") || trimmed.startsWith("qwdtt:config")) {
-        try {
-            val uri = android.net.Uri.parse(trimmed.replace("qwdtt:config", "qwdtt://config"))
-            val name = uri.getQueryParameter("name") ?: "QR Профиль"
-            val peerRaw = uri.getQueryParameter("peer") ?: return null
-            val dtlsPortParam = uri.getQueryParameter("dtls_port") ?: uri.getQueryParameter("server_port")
-            val peer = if (dtlsPortParam != null) {
-                PeerAddress.ensurePort(peerRaw, dtlsPortParam.toIntOrNull()?.coerceIn(1, 65535) ?: 56000)
-            } else {
-                peerRaw
-            }
-            val hashes = uri.getQueryParameter("hashes") ?: ""
-            val workers = uri.getQueryParameter("workers")?.toIntOrNull() ?: 18
-            val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 9000
-            val pass = uri.getQueryParameter("pass") ?: ""
-            return ConnectionProfile(
-                id = UUID.randomUUID().toString(),
-                name = name,
-                peer = peer,
-                vkHashes = hashes,
-                workersPerHash = workers,
-                listenPort = port,
-                password = pass
-            )
-        } catch (e: Exception) {
-            // fallback
-        }
-    }
+    SubscriptionImport.parseConfigLink(trimmed, defaultWorkers = 18)?.let { return it }
 
     // 2. Try JSON (raw or base64)
     var jsonStr = trimmed

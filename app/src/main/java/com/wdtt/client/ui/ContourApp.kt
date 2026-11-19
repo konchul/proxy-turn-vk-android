@@ -1,6 +1,7 @@
 package com.wdtt.client.ui
 
 import android.content.ClipData
+import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -229,6 +230,7 @@ internal class ContourApp(private val activity: MainActivity) {
         send("qwdttTunnel", obj(
             "link" to status, "phases" to JSONArray(if (pipeline.current != null || pipeline.failed != null) pipeline.stepsToShow().map { it.label } else emptyList()),
             "phase" to pipeline.current?.label, "failed" to pipeline.failed?.label,
+            "timeout" to pipeline.timeoutSec.takeIf { status == "failed" && pipeline.timedOut },
             "completed" to JSONArray(pipeline.completed.map { it.label }),
             "workers" to TunnelManager.activeWorkers.value,
             "session" to TunnelManager.connectedSinceMs.value,
@@ -349,6 +351,13 @@ internal class ContourApp(private val activity: MainActivity) {
             "logs.share" -> share(logsText())
             "logs.clear" -> TunnelManager.clearLogs()
             "notifications" -> activity.openNotificationSettings()
+            "github" -> {
+                try {
+                    activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/konchul/proxy-turn-vk-android")))
+                } catch (_: ActivityNotFoundException) {
+                    error("Не удалось открыть GitHub")
+                }
+            }
             "vk.login" -> {
                 VkAuthWebViewManager.loginOnly(activity)
                 return if (VkAuthWebViewManager.hasVkSessionCookie()) "Вход в VK выполнен" else "Вход в VK не завершён"
@@ -538,7 +547,8 @@ internal class ContourApp(private val activity: MainActivity) {
         scope.launch {
             try {
                 writes.withLock {
-                    if (uri.scheme in setOf("qwdtt", "wdtt")) importText(uri.toString())
+                    val raw = uri.toString()
+                    if (SubscriptionImport.isConfigLink(raw) || uri.scheme == "wdtt") importText(raw)
                     else {
                         val bytes = withContext(Dispatchers.IO) {
                             activity.contentResolver.openInputStream(uri)?.use { readLimited(it, 4_194_304) }
