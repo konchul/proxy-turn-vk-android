@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# qWDTT server installer: binary from latest GitHub release + systemd unit.
-# Usage: curl -fsSL https://raw.githubusercontent.com/konchul/proxy-turn-vk-android/master/install.sh | bash
+# qWDTT server installer: released Linux binary and systemd unit.
+# Usage: sudo bash install.sh
 set -euo pipefail
 REPO="konchul/proxy-turn-vk-android"
 BIN=/usr/local/bin/wdtt-server
 CFG=/etc/wdtt
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
-echo "⬇ downloading wdtt-server (latest release)..."
-curl -fsSL "https://github.com/$REPO/releases/latest/download/wdtt-server-linux-amd64" -o "$BIN"
-chmod +x "$BIN"
+download=$(mktemp)
+trap 'rm -f -- "$download"' EXIT
+asset=wdtt-server-linux-amd64
+echo "Downloading wdtt-server from the latest release..."
+if ! status=$(curl -fsSL --write-out '%{http_code}' "https://github.com/$REPO/releases/latest/download/$asset" -o "$download"); then
+  [ "$status" = 404 ] || exit 1
+  echo "Latest release has no server binary. Downloading it from v1.4.6..."
+  curl -fsSL "https://github.com/$REPO/releases/download/v1.4.6/$asset" -o "$download"
+fi
+install -m 0755 "$download" "$BIN"
 mkdir -p "$CFG"
 [ -f "$CFG/main.password" ] || { openssl rand -hex 12 > "$CFG/main.password"; chmod 600 "$CFG/main.password"; }
 [ -f "$CFG/admin.token" ] || { openssl rand -hex 32 > "$CFG/admin.token"; chmod 600 "$CFG/admin.token"; }
@@ -37,5 +44,5 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now wdtt
-echo "✓ qWDTT server installed. Password:"
+echo "qWDTT server installed. Password:"
 cat "$CFG/main.password"
