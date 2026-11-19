@@ -147,7 +147,7 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_VIEW -> {
                 val uri = intent.data
                 if (uri != null) {
-                    pendingFileUri.value = uri
+                    contourApp?.importUri(uri) ?: run { pendingFileUri.value = uri }
                 }
             }
         }
@@ -182,33 +182,19 @@ class MainActivity : ComponentActivity() {
 
         handleIncomingIntent(intent)
 
-        setContent {
-            val settingsStore = remember { SettingsStore(this) }
-            val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle(initialValue = "system")
-            val isDynamicColor by settingsStore.isDynamicColor.collectAsStateWithLifecycle(initialValue = false)
-            val themePalette by settingsStore.themePalette.collectAsStateWithLifecycle(initialValue = "indigo")
-            val scope = rememberCoroutineScope()
-
-            WDTTTheme(themeMode = themeMode, dynamicColor = isDynamicColor, themePalette = themePalette) {
-                MainScreen(
-                    settingsStore = settingsStore,
-                    themeMode = themeMode,
-                    onThemeChange = { mode ->
-                        scope.launch {
-                            settingsStore.saveThemeMode(mode)
-                        }
-                    },
-                    isDynamicColor = isDynamicColor,
-                    onDynamicColorChange = { enabled ->
-                        scope.launch { settingsStore.saveDynamicColor(enabled) }
-                    },
-                    currentPalette = themePalette,
-                    onPaletteChange = { palette ->
-                        scope.launch { settingsStore.saveThemePalette(palette) }
-                    }
-                )
-            }
+        contourApp = com.wdtt.client.ui.ContourApp(this).also { it.mount() }
+        pendingFileUri.value?.let { uri ->
+            pendingFileUri.value = null
+            contourApp?.importUri(uri)
         }
+    }
+
+    private var contourApp: com.wdtt.client.ui.ContourApp? = null
+
+    override fun onDestroy() {
+        contourApp?.destroy()
+        contourApp = null
+        super.onDestroy()
     }
 
     private fun checkAndRequestNotifications() {

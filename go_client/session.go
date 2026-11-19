@@ -562,6 +562,9 @@ func RunSession(
 
 	var workerUnresponsive atomic.Bool
 
+	var lastKeepalive atomic.Pointer[time.Time]
+	var livePing atomic.Pointer[livePingSample]
+
 	// Keepalive: prevents TURN allocation timeout and idle disconnect.
 	// Пакет не пишется напрямую в activeConn (это была бы вторая горутина,
 	// конкурирующая за conn с основным Writer'ом ниже) — кладётся в
@@ -593,7 +596,9 @@ func RunSession(
 					sessCancel()
 					return
 				}
-				if !step.sendKeepalive {
+				request := pendingLivePing.Load()
+				wantPing := request != nil && time.Now().Before(request.expires) && lastKeepalive.Load() == nil
+				if !step.sendKeepalive && !wantPing {
 					continue
 				}
 				size := keepaliveMinSize + rand.Intn(keepaliveMaxSize)
@@ -671,6 +676,14 @@ func RunSession(
 			if atomic.CompareAndSwapUint32(&firstWireWrite, 0, 1) {
 				log.Printf("[ВОРКЕР #%d] [ДЕБАГ] Отправлен ПЕРВЫЙ пакет в соединение (%d байт)", sessionID, len(pkt))
 			}
+			if len(pkt) > 0 && pkt[0] == keepaliveByte {
+				now := time.Now()
+				previous := lastKeepalive.Swap(&now)
+				request := pendingLivePing.Load()
+				if previous == nil && request != nil && now.Before(request.expires) && pendingLivePing.CompareAndSwap(request, nil) {
+					livePing.Store(&livePingSample{id: request.id, sent: now})
+				}
+			}
 			_, writeErr := activeConn.Write(pkt)
 			putPktBuf(pkt)
 			if writeErr != nil {
@@ -721,6 +734,11 @@ func RunSession(
 			idleReadTimeouts = 0
 			now := time.Now()
 			if n == 1 && b[0] == keepaliveByte {
+				sample := livePing.Swap(nil)
+				lastKeepalive.Store(nil)
+				if sample != nil && now.Sub(sample.sent) < 5*time.Second {
+					fmt.Printf("LIVE_PONG|%d|%d\n", sample.id, max(1, now.Sub(sample.sent).Milliseconds()))
+				}
 				if liveness.notePong(now) {
 					fmt.Println("WORKER_KEEPALIVE_READY")
 				}
@@ -766,6 +784,18 @@ func RunSession(
 	}
 	return configDelivered, nil
 }
+
+type livePingRequest struct {
+	id      uint64
+	expires time.Time
+}
+
+type livePingSample struct {
+	id   uint64
+	sent time.Time
+}
+
+var pendingLivePing atomic.Pointer[livePingRequest]
 
 func RunPing(
 	ctx context.Context,

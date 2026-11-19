@@ -160,7 +160,8 @@ object SubscriptionImport {
             password = pass,
             trafficMb = traffic.coerceAtLeast(0.0),
             groupId = "",
-            useGlobalHashes = hashes.isBlank()
+            useGlobalHashes = hashes.isBlank(),
+            countryFlag = jsonObj.optString("flag"),
         )
     }
 
@@ -181,7 +182,8 @@ object SubscriptionImport {
                 workersPerHash = workers,
                 listenPort = port,
                 password = pass,
-                useGlobalHashes = hashes.isBlank()
+                useGlobalHashes = hashes.isBlank(),
+                countryFlag = uri.getQueryParameter("flag").orEmpty(),
             )
         } catch (_: Exception) {
             null

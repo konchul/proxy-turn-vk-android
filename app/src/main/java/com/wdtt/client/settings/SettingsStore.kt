@@ -99,6 +99,7 @@ class SettingsStore(context: Context) {
         private val GO_DNS_DOH_CUSTOM = stringPreferencesKey("go_dns_doh_custom")
         private val OBFS_MODE = stringPreferencesKey("obfs_mode") // "audio" or "video"
         private val INTERFACE_ROLE = stringPreferencesKey("interface_role") // "user" or "admin"
+        private val CONTOUR_LANGUAGE = stringPreferencesKey("contour_language")
         
         // ═══ VPN Exclusions Mode ═══
         private val IS_WHITELIST = booleanPreferencesKey("is_whitelist")
@@ -386,7 +387,12 @@ class SettingsStore(context: Context) {
     val obfsMode: Flow<String> = dataStore.data.map { normalizeObfsMode(it[OBFS_MODE]) }
     /** "admin" показывает вкладку Деплой; "user" скрывает. По умолчанию admin. */
     val interfaceRole: Flow<String> = dataStore.data.map {
-        if ((it[INTERFACE_ROLE] ?: "admin").equals("user", ignoreCase = true)) "user" else "admin"
+        if (it[INTERFACE_ROLE].equals("admin", ignoreCase = true)) "admin" else "user"
+    }
+    val contourLanguage: Flow<String> = dataStore.data.map { if (it[CONTOUR_LANGUAGE] == "en") "en" else "ru" }
+
+    suspend fun saveContourLanguage(language: String) {
+        dataStore.edit { it[CONTOUR_LANGUAGE] = if (language == "en") "en" else "ru" }
     }
     val captchaWbvSolveMethod: Flow<String> = dataStore.data.map { it[CAPTCHA_WBV_SOLVE_METHOD] ?: "auto" }
 
@@ -423,7 +429,7 @@ class SettingsStore(context: Context) {
     val supportNoticeShownVersionCode: Flow<Int> = dataStore.data.map { it[SUPPORT_NOTICE_SHOWN_VERSION_CODE] ?: 0 }
 
     // ═══ Поведение ═══
-    val autoSwitchToLogs: Flow<Boolean> = dataStore.data.map { it[AUTO_SWITCH_TO_LOGS] ?: true }
+    val autoSwitchToLogs: Flow<Boolean> = dataStore.data.map { it[AUTO_SWITCH_TO_LOGS] ?: false }
     val stopOnWifi: Flow<Boolean> = dataStore.data.map { it[STOP_ON_WIFI] ?: false }
     /** Периодический перерезолв доменов обхода. По умолчанию включён. */
     val bypassAutoRefresh: Flow<Boolean> = dataStore.data.map { it[BYPASS_AUTO_REFRESH] ?: true }

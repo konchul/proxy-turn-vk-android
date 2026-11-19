@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -153,6 +154,10 @@ func main() {
 			case line == "STOP":
 				cancel()
 				return
+			case strings.HasPrefix(line, "LIVE_PING|"):
+				if id, err := strconv.ParseUint(strings.TrimPrefix(line, "LIVE_PING|"), 10, 64); err == nil {
+					pendingLivePing.Store(&livePingRequest{id: id, expires: time.Now().Add(5 * time.Second)})
+				}
 			case strings.HasPrefix(line, "CAPTCHA_RESULT|"):
 				result := strings.TrimPrefix(line, "CAPTCHA_RESULT|")
 				drainCaptchaResult()

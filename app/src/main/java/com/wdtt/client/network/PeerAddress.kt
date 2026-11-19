@@ -9,18 +9,18 @@ object PeerAddress {
             return close != -1 && trimmed.length > close + 1 && trimmed[close + 1] == ':'
         }
         val lastColon = trimmed.lastIndexOf(':')
-        if (lastColon <= 0) return false
+        if (lastColon <= 0 || trimmed.indexOf(':') != lastColon) return false
         val portPart = trimmed.substring(lastColon + 1)
         return portPart.isNotEmpty() && portPart.all(Char::isDigit)
     }
 
     fun host(peer: String): String {
         val trimmed = peer.trim()
-        if (!hasExplicitPort(trimmed)) return trimmed
         if (trimmed.startsWith("[")) {
             val close = trimmed.indexOf(']')
-            return trimmed.substring(1, close)
+            if (close > 0) return trimmed.substring(1, close)
         }
+        if (!hasExplicitPort(trimmed)) return trimmed
         return trimmed.substring(0, trimmed.lastIndexOf(':'))
     }
 
@@ -34,14 +34,15 @@ object PeerAddress {
         val trimmed = peer.trim()
         if (trimmed.isEmpty()) return trimmed
         if (hasExplicitPort(trimmed)) return trimmed
-        return "$trimmed:$defaultPort"
+        return withPort(trimmed, defaultPort)
     }
 
     /** В отличие от [ensurePort] — всегда заменяет порт на [newPort], даже если он уже был указан. */
     fun withPort(peer: String, newPort: Int): String {
         val trimmed = peer.trim()
         if (trimmed.isEmpty()) return trimmed
-        return "${host(trimmed)}:$newPort"
+        val address = host(trimmed)
+        return if (address.contains(':')) "[$address]:$newPort" else "$address:$newPort"
     }
 
     fun httpEndpoint(peer: String, defaultPort: Int): String {

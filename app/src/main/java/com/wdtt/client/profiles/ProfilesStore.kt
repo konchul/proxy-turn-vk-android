@@ -25,7 +25,8 @@ data class ConnectionProfile(
     val password: String,
     val trafficMb: Double = 0.0,
     val groupId: String = "",
-    val useGlobalHashes: Boolean = vkHashes.isBlank()
+    val useGlobalHashes: Boolean = vkHashes.isBlank(),
+    val countryFlag: String = "",
 )
 
 data class ProfileGroup(
@@ -64,6 +65,7 @@ class ProfilesStore(context: Context) {
         private fun useGlobalHashesKey(id: String) = booleanPreferencesKey("profile_use_global_hashes_$id")
         private fun trafficKey(id: String) = androidx.datastore.preferences.core.doublePreferencesKey("profile_traffic_$id")
         private fun groupIdKey(id: String) = stringPreferencesKey("profile_group_id_$id")
+        private fun countryFlagKey(id: String) = stringPreferencesKey("profile_country_flag_$id")
 
         private const val GROUPS_IDS_KEY = "groups_ids"
         private fun groupsIdsKey() = stringPreferencesKey(GROUPS_IDS_KEY)
@@ -103,7 +105,8 @@ class ProfilesStore(context: Context) {
                 val traffic = prefs[trafficKey(id)] ?: 0.0
                 val groupId = prefs[groupIdKey(id)] ?: ""
                 val useGlobal = prefs[useGlobalHashesKey(id)] ?: true
-                list.add(ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal))
+                val countryFlag = prefs[countryFlagKey(id)].orEmpty()
+                list.add(ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal, countryFlag))
             }
             list
         }
@@ -338,6 +341,7 @@ class ProfilesStore(context: Context) {
             prefs[trafficKey(profile.id)] = profile.trafficMb
             prefs[groupIdKey(profile.id)] = profile.groupId
             prefs[useGlobalHashesKey(profile.id)] = profile.useGlobalHashes
+            prefs[countryFlagKey(profile.id)] = profile.countryFlag
         }
     }
 
@@ -366,6 +370,7 @@ class ProfilesStore(context: Context) {
             prefs.remove(useGlobalHashesKey(id))
             prefs.remove(trafficKey(id))
             prefs.remove(groupIdKey(id))
+            prefs.remove(countryFlagKey(id))
         }
     }
 
@@ -441,7 +446,8 @@ class ProfilesStore(context: Context) {
         val traffic = prefs[trafficKey(id)] ?: 0.0
         val groupId = prefs[groupIdKey(id)] ?: ""
         val useGlobal = prefs[useGlobalHashesKey(id)] ?: hashes.isBlank()
-        return ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal)
+        val countryFlag = prefs[countryFlagKey(id)].orEmpty()
+        return ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal, countryFlag)
     }
 
     suspend fun incrementProfileTraffic(id: String, additionalTrafficMb: Double) = withContext(Dispatchers.IO) {
