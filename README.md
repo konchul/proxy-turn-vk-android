@@ -4,7 +4,7 @@
 
 VPN-клиент для Android с сервером для Linux. Поддерживает WireGuard, Raw TUN и локальный SOCKS5 через TURN.
 
-[Скачать APK](https://github.com/konchul/proxy-turn-vk-android/releases/latest) · [Развернуть на ноде](#развёртывание-на-ноде) · [Contributors](#contributors) · [Оптимизации](#оптимизации)
+[Скачать APK](https://github.com/konchul/proxy-turn-vk-android/releases/latest) · [Развернуть на ноде](#развёртывание-на-ноде) · [Оптимизации](#оптимизации)
 
 ## Android
 
@@ -37,12 +37,7 @@ systemctl is-active wdtt
 
 Команды сборки Android есть в [GitHub Actions](.github/workflows/android-release.yml). Для локального APK запустите `./gradlew :app:assembleDebug -PtargetAbis=arm64-v8a` с настроенными JDK 17, Go 1.26 и Android SDK 35 с NDK 27.2.
 
-## Contributors
-
-- [@konchul](https://github.com/konchul) — разработка и поддержка qWDTT.
-- Проект основан на форке [SpaceNeuroX](https://github.com/SpaceNeuroX/proxy-turn-vk-android) и оригинале [amurcanov](https://github.com/amurcanov/proxy-turn-vk-android).
-
-Лицензия — [GPL-3.0](LICENSE).
+Проект основан на форке [SpaceNeuroX](https://github.com/SpaceNeuroX/proxy-turn-vk-android) и оригинале [amurcanov](https://github.com/amurcanov/proxy-turn-vk-android).
 
 ## Оптимизации
 
@@ -51,3 +46,7 @@ systemctl is-active wdtt
 - **Стабильнее Raw TUN.** Небольшие UDP-потоки закрепляются за одним воркером, чтобы пакеты реже приходили не по порядку. Исправлены контрольные суммы TCP/UDP и сегментация пакетов при GSO.
 
 [Технические подробности](docs/OPTIMIZATIONS.md) · [Бенчмарки](docs/BENCHMARK.md) · [Замеры TCP и MTU](https://github.com/konchul/proxy-turn-vk-android/blob/0c6f4e422ed5ad7e444bd96f6a197af057328ec3/README.md#бенчмарки)
+
+## Лицензия
+
+[GPL-3.0](LICENSE).
