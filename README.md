@@ -1,4 +1,4 @@
-# qWDTT
+# qWDTT - Contur
 
 ![qWDTT «Контур» для Android — туннель, профили, обход и логи](docs/qwdtt-contour-banner.png)
 
